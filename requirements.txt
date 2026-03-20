@@ -1,0 +1,17 @@
+# Python version
+python==3.10.20
+
+# Core dependencies
+numpy==2.2.6
+opencv-python==4.13.0.92
+scipy==1.15.3
+matplotlib==3.10.8
+
+# 3D visualization
+open3d==0.19.0
+
+# RealSense camera
+pyrealsense2==2.56.5.9235
+
+# Type checking
+mypy==1.8.0

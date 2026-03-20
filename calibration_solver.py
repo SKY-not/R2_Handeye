@@ -1,0 +1,249 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+标定计算模块 - 负责 AX=XB 求解
+"""
+
+import numpy as np
+import os
+import sys
+import cv2
+from typing import Any, Dict, List, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from calibration.solver_axxb import HandEyeSolver
+from calibration.optimizer import HandEyeOptimizer
+from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG, get_results_path, REALSENSE_CONFIG
+
+
+class CalibrationSolver:
+    """手眼标定求解器"""
+
+    def __init__(self, mode: str) -> None:
+        """
+        初始化求解器
+
+        Args:
+            mode: 'eye_on_hand' 或 'eye_to_hand'
+        """
+        self.mode = mode
+        self.solver = HandEyeSolver(mode)
+        self.optimizer = HandEyeOptimizer(mode)
+
+        # 相机内参
+        intr = REALSENSE_CONFIG['default_intrinsics']
+        self.intrinsics = np.array([
+            [intr['fx'], 0, intr['cx']],
+            [0, intr['fy'], intr['cy']],
+            [0, 0, 1]
+        ])
+        self.min_points_required = max(6, int(CALIBRATION_CONFIG.get('min_calibration_points', 6)))
+
+    def _build_checkerboard_object_points(self) -> np.ndarray:
+        """Build checkerboard object points in board coordinate system."""
+        cb_cols, cb_rows = CHECKERBOARD_CONFIG['size']
+        square = CHECKERBOARD_CONFIG['square_size']
+        objp = np.zeros((cb_cols * cb_rows, 3), dtype=np.float32)
+        objp[:, :2] = np.mgrid[0:cb_cols, 0:cb_rows].T.reshape(-1, 2)
+        objp *= square
+        return objp
+
+    @staticmethod
+    def _rvec_tvec_to_transform(rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
+        """Convert OpenCV rvec/tvec to 4x4 homogeneous transform."""
+        R, _ = cv2.Rodrigues(rvec)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = tvec.reshape(3)
+        return T
+
+    @staticmethod
+    def _invert_transform(T: np.ndarray) -> np.ndarray:
+        """Invert 4x4 homogeneous transform."""
+        R = T[:3, :3]
+        t = T[:3, 3]
+        T_inv = np.eye(4)
+        T_inv[:3, :3] = R.T
+        T_inv[:3, 3] = -R.T @ t
+        return T_inv
+
+    @staticmethod
+    def _average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
+        """Average multiple 4x4 transforms (SVD for rotation, mean for translation)."""
+        if len(transforms) == 0:
+            raise ValueError("无法对空变换列表求平均")
+
+        rotations = np.array([T[:3, :3] for T in transforms])
+        translations = np.array([T[:3, 3] for T in transforms])
+
+        R_mean = np.mean(rotations, axis=0)
+        U, _, Vt = np.linalg.svd(R_mean)
+        R = U @ Vt
+        if np.linalg.det(R) < 0:
+            U[:, -1] *= -1
+            R = U @ Vt
+
+        T_avg = np.eye(4)
+        T_avg[:3, :3] = R
+        T_avg[:3, 3] = np.mean(translations, axis=0)
+        return T_avg
+
+    def load_data(self, data_collector: Any) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+        """
+        加载采集的数据
+
+        Args:
+            data_collector: CalibDataCollector 对象
+
+        Returns:
+            robot_poses: 机器人位姿列表 (T_base_tcp)
+            camera_poses: 相机观测位姿列表 (T_cam_board)
+            corners_2d_list: 每帧角点像素坐标
+        """
+        saved_data = data_collector.get_saved_data()
+
+        if len(saved_data) < self.min_points_required:
+            raise ValueError(
+                f"数据点不足: {len(saved_data)}, 需要至少{self.min_points_required}个"
+            )
+
+        print(f"加载了 {len(saved_data)} 个数据点")
+
+        robot_poses = []
+        camera_poses = []
+        corners_2d_list = []
+        objp = self._build_checkerboard_object_points()
+        dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+
+        for d in saved_data:
+            tcp = d['tcp']
+            corners = d['corners']
+
+            if corners is None:
+                print(f"  警告: 帧 {d['index']} 数据不完整，跳过")
+                continue
+
+            corners_2d = corners.reshape(-1, 2).astype(np.float32)
+            ok, rvec, tvec = cv2.solvePnP(
+                objp,
+                corners_2d,
+                self.intrinsics,
+                dist_coeffs,
+                flags=cv2.SOLVEPNP_ITERATIVE
+            )
+
+            if not ok:
+                print(f"  警告: 帧 {d['index']} PnP求解失败，跳过")
+                continue
+
+            camera_pose = self._rvec_tvec_to_transform(rvec, tvec)
+
+            robot_poses.append(tcp)
+            camera_poses.append(camera_pose)
+            corners_2d_list.append(corners_2d)
+
+        if len(robot_poses) < self.min_points_required:
+            raise ValueError(
+                f"有效数据不足: {len(robot_poses)}, 需要至少{self.min_points_required}个"
+            )
+
+        return robot_poses, camera_poses, corners_2d_list
+
+    def solve(
+        self,
+        robot_poses: List[np.ndarray],
+        camera_poses: List[np.ndarray],
+        corners_2d_list: List[np.ndarray]
+    ) -> Dict[str, Any]:
+        """
+        执行标定求解
+
+        Args:
+            robot_poses: 机器人位姿列表
+            camera_poses: 相机观测位姿列表
+            corners_2d_list: 角点像素坐标列表
+
+        Returns:
+            result: {
+                'X': 手眼变换矩阵,
+                'z_scale': 深度缩放因子,
+                'optimization_result': 优化结果
+            }
+        """
+        print("\n" + "=" * 50)
+        print("标定计算")
+        print("=" * 50)
+
+        # 1. SVD 求解
+        print("\n[1/2] SVD 求解...")
+        if self.mode == 'eye_on_hand':
+            # Eye-on-Hand:
+            # A = inv(T_base_tcp_i) * T_base_tcp_j
+            # B = T_cam_board_i * inv(T_cam_board_j)
+            # Existing solver constructs B as inv(T1)*T2, so we invert all camera poses
+            # to obtain B = T1 * inv(T2).
+            camera_poses_for_solver = [self._invert_transform(T) for T in camera_poses]
+            X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses_for_solver)
+        else:
+            # Eye-to-Hand:
+            # First solve Y = T_tcp_board from
+            #   inv(T_base_tcp_i) * T_base_tcp_j * Y = Y * inv(T_cam_board_i) * T_cam_board_j
+            Y_tcp_board = self.solver.solve_axxb_svd(robot_poses, camera_poses)
+
+            # Then recover X = T_base_cam from
+            #   T_base_tcp_i * Y = X * T_cam_board_i
+            X_candidates = [
+                tcp @ Y_tcp_board @ self._invert_transform(cam_pose)
+                for tcp, cam_pose in zip(robot_poses, camera_poses)
+            ]
+            X_svd = self._average_transforms(X_candidates)
+        print("SVD 求解完成")
+
+        # 打印SVD结果
+        pos = X_svd[:3, 3]
+        print(f"  位置: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] m")
+
+        # 2. 先使用稳定的AX=XB结果。后续可在全角点重投影目标上做非线性优化。
+        print("\n[2/2] 非线性优化...")
+        X_opt = X_svd
+        z_scale = 1.0
+        opt_result = None
+        print("当前版本使用SVD结果作为最终解")
+        print(f"  深度缩放因子: {z_scale:.6f}")
+
+        # 打印优化后结果
+        pos = X_opt[:3, 3]
+        print(f"  位置: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] m")
+
+        # 保存结果
+        self._save_result(X_opt, z_scale)
+
+        return {
+            'X': X_opt,
+            'z_scale': z_scale,
+            'optimization_result': opt_result,
+            'robot_poses': robot_poses,
+            'camera_poses': camera_poses,
+            'corners_2d_list': corners_2d_list
+        }
+
+    def _save_result(self, X: np.ndarray, z_scale: float) -> None:
+        """保存结果到文件"""
+        results_path = get_results_path(self.mode)
+        os.makedirs(results_path, exist_ok=True)
+
+        # 保存手眼变换矩阵
+        np.savetxt(os.path.join(results_path, 'handeye_transform.txt'), X, delimiter=' ')
+
+        # 保存深度缩放因子
+        np.savetxt(os.path.join(results_path, 'depth_scale.txt'), np.array([z_scale]), delimiter=' ')
+
+        # 保存详细信息
+        with open(os.path.join(results_path, 'calibration_info.txt'), 'w') as f:
+            f.write(f"Mode: {self.mode}\n")
+            f.write(f"Z-scale: {z_scale:.6f}\n")
+            f.write(f"\nTransform (4x4):\n")
+            f.write(str(X))
+
+        print(f"\n结果已保存至: {results_path}")
