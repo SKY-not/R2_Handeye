@@ -94,7 +94,7 @@ class HandEyeSolver:
         axis = rotvec / theta
         K = HandEyeSolver.vec_to_skew(axis)
 
-        return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+        return np.asarray(np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K), dtype=np.float64)
 
     @staticmethod
     def mat_to_pose(T: np.ndarray) -> np.ndarray:
@@ -160,7 +160,7 @@ class HandEyeSolver:
         Returns:
             delta_T: 相对变换 (4x4), 使得 T2 = delta_T @ T1
         """
-        return self.invert_transform(T1) @ T2
+        return np.asarray(self.invert_transform(T1) @ T2, dtype=np.float64)
 
     def solve_axxb_svd(self, robot_poses: List[np.ndarray], camera_poses: List[np.ndarray]) -> np.ndarray:
         """
@@ -227,7 +227,7 @@ class HandEyeSolver:
         X[:3, :3] = R_X
         X[:3, 3] = t_X
 
-        return X
+        return np.asarray(X, dtype=np.float64)
 
     def solve_rotation(self, R_A: np.ndarray, R_B: np.ndarray) -> np.ndarray:
         """
@@ -250,7 +250,7 @@ class HandEyeSolver:
             Vt[-1, :] *= -1
             R_X = U @ Vt
 
-        return R_X
+        return np.asarray(R_X, dtype=np.float64)
 
     def solve_translation(
         self,
@@ -279,7 +279,7 @@ class HandEyeSolver:
         # 由于M可能是奇异的，我们使用伪逆
         t_X = np.linalg.lstsq(M, rhs, rcond=None)[0]
 
-        return t_X
+        return np.asarray(t_X, dtype=np.float64)
 
     # ==================== 带 z_scale 的优化 ====================
 
@@ -360,7 +360,7 @@ class HandEyeSolver:
                     residual.append(error)
 
             residual = np.concatenate(residual)
-            return np.sum(residual ** 2)
+            return float(np.sum(residual ** 2))
 
         # 优化
         result = optimize.minimize(
@@ -386,7 +386,7 @@ class HandEyeSolver:
     @staticmethod
     def get_checkerboard_center() -> np.ndarray:
         """获取棋盘格中心的世界坐标 (需要根据实际标定板设置)"""
-        return np.array([0, 0, 0, 1])
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
 
     # ==================== 简化的求解方法 ====================
 

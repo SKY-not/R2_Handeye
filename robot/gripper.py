@@ -12,9 +12,9 @@ class RobotiqGripper:
     """Robotiq 85 夹爪控制类"""
 
     def __init__(self) -> None:
-        self.socket = None
-        self.host = None
-        self.port = None
+        self.socket: Optional[socket.socket] = None
+        self.host: Optional[str] = None
+        self.port: Optional[int] = None
 
     def connect(self, host: str, port: int = 63352) -> None:
         """连接到夹爪"""

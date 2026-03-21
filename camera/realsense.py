@@ -8,7 +8,7 @@ Intel RealSense D405 相机驱动
 import numpy as np
 import pyrealsense2 as rs
 import cv2
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 
 class RealSenseCamera:
@@ -35,11 +35,12 @@ class RealSenseCamera:
         self.fps = fps
         self.device_id = device_id
 
-        self.pipeline = None
-        self.config = None
-        self.intrinsics = None
-        self.depth_scale = None
-        self.align = None
+        self.pipeline: Optional[Any] = None
+        self.config: Optional[Any] = None
+        self.intrinsics: Optional[np.ndarray] = None
+        self.dist_coeffs: Optional[np.ndarray] = None
+        self.depth_scale: Optional[float] = None
+        self.align: Optional[Any] = None
 
         self.connected = False
 
@@ -50,21 +51,24 @@ class RealSenseCamera:
 
         # 配置流
         self.config = rs.config()
+        config = self.config
         if self.device_id:
-            self.config.enable_device(self.device_id)
+            config.enable_device(self.device_id)
 
-        self.config.enable_stream(rs.stream.depth, self.im_width, self.im_height, rs.format.z16, self.fps)
-        self.config.enable_stream(rs.stream.color, self.im_width, self.im_height, rs.format.bgr8, self.fps)
+        config.enable_stream(rs.stream.depth, self.im_width, self.im_height, rs.format.z16, self.fps)
+        config.enable_stream(rs.stream.color, self.im_width, self.im_height, rs.format.bgr8, self.fps)
 
         # 启动管道
-        profile = self.pipeline.start(self.config)
+        pipeline = self.pipeline
+        profile = pipeline.start(config)
 
         # 获取内参
         rgb_profile = profile.get_stream(rs.stream.color)
-        self.intrinsics = self._get_intrinsics(rgb_profile)
+        self.intrinsics = np.asarray(self._get_intrinsics(rgb_profile), dtype=np.float64)
+        self.dist_coeffs = np.asarray(self._get_dist_coeffs(rgb_profile), dtype=np.float64).reshape(-1, 1)
 
         # 获取深度缩放因子
-        self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+        self.depth_scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
 
         # 创建对齐对象 (对齐到彩色图)
         self.align = rs.align(rs.stream.color)
@@ -73,6 +77,7 @@ class RealSenseCamera:
         print(f"RealSense D405 已连接")
         print(f"  分辨率: {self.im_width}x{self.im_height}")
         print(f"  内参:\n{self.intrinsics}")
+        print(f"  畸变参数: {self.dist_coeffs.ravel() if self.dist_coeffs is not None else 'None'}")
         print(f"  深度缩放: {self.depth_scale}")
 
     def disconnect(self) -> None:
@@ -97,21 +102,25 @@ class RealSenseCamera:
         """
         if not self.connected:
             self.connect()
+        pipeline = self.pipeline
+        align = self.align
+        depth_scale = self.depth_scale
+        assert pipeline is not None and align is not None and depth_scale is not None
         # 等待帧
-        frames = self.pipeline.wait_for_frames()
+        frames = pipeline.wait_for_frames()
 
         # 对齐深度图到彩色图
-        aligned_frames = self.align.process(frames)
+        aligned_frames = align.process(frames)
         depth_frame = aligned_frames.get_depth_frame()
         color_frame = aligned_frames.get_color_frame()
 
         # 转换为numpy数组
         # 深度图: uint16 -> 米
         depth_image = np.asarray(depth_frame.get_data(), dtype=np.float32)
-        depth_image = depth_image * self.depth_scale  # 转换为米
+        depth_image = depth_image * depth_scale  # 转换为米
 
         # 彩色图: BGR格式
-        color_image = np.asarray(color_frame.get_data())
+        color_image = np.asarray(color_frame.get_data(), dtype=np.uint8)
 
         return color_image, depth_image
 
@@ -119,22 +128,27 @@ class RealSenseCamera:
         """获取彩色图像"""
         if not self.connected:
             self.connect()
-
-        frames = self.pipeline.wait_for_frames()
+        pipeline = self.pipeline
+        assert pipeline is not None
+        frames = pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
-        return np.asarray(color_frame.get_data())
+        return np.asarray(color_frame.get_data(), dtype=np.uint8)
 
     def get_depth_image(self) -> np.ndarray:
         """获取深度图像 (单位: 米)"""
         if not self.connected:
             self.connect()
+        pipeline = self.pipeline
+        align = self.align
+        depth_scale = self.depth_scale
+        assert pipeline is not None and align is not None and depth_scale is not None
 
-        frames = self.pipeline.wait_for_frames()
-        aligned_frames = self.align.process(frames)
+        frames = pipeline.wait_for_frames()
+        aligned_frames = align.process(frames)
         depth_frame = aligned_frames.get_depth_frame()
 
         depth_image = np.asarray(depth_frame.get_data(), dtype=np.float32)
-        depth_image = depth_image * self.depth_scale
+        depth_image = depth_image * depth_scale
         return depth_image
 
     def get_aligned_depth(self, u: int, v: int) -> float:
@@ -152,8 +166,8 @@ class RealSenseCamera:
 
         depth_img = self.get_depth_image()
         if 0 <= v < depth_img.shape[0] and 0 <= u < depth_img.shape[1]:
-            return depth_img[v, u]
-        return 0
+            return float(depth_img[v, u])
+        return 0.0
 
     def project_to_3d(self, u: int, v: int, depth: float) -> np.ndarray:
         """
@@ -166,16 +180,18 @@ class RealSenseCamera:
         Returns:
             point_3d: [X, Y, Z] 相机坐标系下的3D点
         """
-        fx = self.intrinsics[0, 0]
-        fy = self.intrinsics[1, 1]
-        cx = self.intrinsics[0, 2]
-        cy = self.intrinsics[1, 2]
+        intrinsics = self.intrinsics
+        assert intrinsics is not None
+        fx = intrinsics[0, 0]
+        fy = intrinsics[1, 1]
+        cx = intrinsics[0, 2]
+        cy = intrinsics[1, 2]
 
         X = (u - cx) * depth / fx
         Y = (v - cy) * depth / fy
         Z = depth
 
-        return np.array([X, Y, Z])
+        return np.array([X, Y, Z], dtype=np.float64)
 
     def _get_intrinsics(self, rgb_profile: Any) -> np.ndarray:
         """
@@ -200,6 +216,14 @@ class RealSenseCamera:
         ])
 
         return intrinsics
+
+    def _get_dist_coeffs(self, rgb_profile: Any) -> np.ndarray:
+        """获取相机畸变系数 (k1, k2, p1, p2, k3)."""
+        raw_intrinsics = rgb_profile.as_video_stream_profile().get_intrinsics()
+        coeffs = list(raw_intrinsics.coeffs)
+        if len(coeffs) >= 5:
+            return np.array(coeffs[:5], dtype=np.float64)
+        return np.zeros(5, dtype=np.float64)
 
     def get_default_intrinsics(self) -> np.ndarray:
         """获取D405默认内参 (可用于未标定的情况)"""

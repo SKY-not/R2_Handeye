@@ -80,7 +80,7 @@ class HandEyeOptimizer:
             X = self.solver.pose_to_mat(params[:6])
             z_scale = params[6]
 
-            errors = []
+            errors: List[np.ndarray] = []
 
             for i in range(n):
                 if isinstance(camera_data[i], np.ndarray):
@@ -112,10 +112,12 @@ class HandEyeOptimizer:
                         p_robot = robot_poses[i] @ np.append([0, 0, 0], 1)
 
                         error = p_world[:3] - p_robot[:3]
-                        errors.append(error)
+                        errors.append(np.asarray(error, dtype=np.float64))
 
-            errors = np.concatenate(errors)
-            return np.sum(errors ** 2)
+            if not errors:
+                return 0.0
+            errors_arr = np.concatenate(errors)
+            return float(np.sum(errors_arr ** 2))
 
         # 优化
         result = optimize.minimize(
@@ -175,7 +177,7 @@ class HandEyeOptimizer:
             X = self.solver.pose_to_mat(params[:6])
             z_scale = params[6]
 
-            errors = []
+            errors: List[np.ndarray] = []
 
             for i in range(n):
                 # 获取深度
@@ -210,10 +212,12 @@ class HandEyeOptimizer:
                     if p_world[2] > 0:
                         u_proj = fx * p_world[0] / p_world[2] + cx
                         v_proj = fy * p_world[1] / p_world[2] + cy
-                        errors.append([u - u_proj, v - v_proj])
+                        errors.append(np.array([u - u_proj, v - v_proj], dtype=np.float64))
 
-            errors = np.array(errors).flatten()
-            return np.sum(errors ** 2)
+            if not errors:
+                return 0.0
+            errors_arr = np.array(errors, dtype=np.float64).flatten()
+            return float(np.sum(errors_arr ** 2))
 
         result = optimize.minimize(
             objective,

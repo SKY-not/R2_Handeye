@@ -1,0 +1,8 @@
+# Ignore collected calibration data (keep directory structure)
+data/**/images/*
+data/**/poses/corners_*.txt
+data/**/poses/tcp_*.txt
+
+# Optional placeholders can still be tracked
+!data/**/images/.gitkeep
+!data/**/poses/.gitkeep

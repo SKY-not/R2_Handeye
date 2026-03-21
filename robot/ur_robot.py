@@ -10,7 +10,7 @@ import struct
 import time
 import numpy as np
 import math
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 
 class URRobot:
@@ -32,12 +32,14 @@ class URRobot:
         """
         self.tcp_host_ip = tcp_host_ip
         self.tcp_port = tcp_port
-        self.tcp_socket = None
+        self.tcp_socket: Optional[socket.socket] = None
 
         # 工作空间限制
         if workspace_limits is None:
-            workspace_limits = [[-0.7, 0.7], [-0.7, 0.7], [0.00, 0.6]]
-        self.workspace_limits = np.asarray(workspace_limits)
+            workspace_limits_arr = np.array([[-0.7, 0.7], [-0.7, 0.7], [0.00, 0.6]], dtype=np.float64)
+        else:
+            workspace_limits_arr = np.asarray(workspace_limits, dtype=np.float64)
+        self.workspace_limits: np.ndarray = workspace_limits_arr
 
         # 速度与加速度参数
         self.joint_acc = 1.4  # 关节加速度
@@ -47,11 +49,12 @@ class URRobot:
 
         # 容差设置
         self.joint_tolerance = 0.01
-        self.tool_pose_tolerance = [0.002, 0.002, 0.002, 0.01, 0.01, 0.01]
+        self.tool_pose_tolerance: list[float] = [0.002, 0.002, 0.002, 0.01, 0.01, 0.01]
 
     def connect(self) -> None:
         """建立TCP连接"""
         self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        assert self.tcp_socket is not None
         self.tcp_socket.connect((self.tcp_host_ip, self.tcp_port))
         print(f"已连接到UR3: {self.tcp_host_ip}:{self.tcp_port}")
 
@@ -158,14 +161,17 @@ class URRobot:
             tcp_command += ",%f" % joint_config[i]
         tcp_command += "],a=%f,v=%f)\n" % (k_acc * self.joint_acc, k_vel * self.joint_vel)
 
-        self.tcp_socket.send(str.encode(tcp_command))
+        sock = self.tcp_socket
+        assert sock is not None
+        sock.send(str.encode(tcp_command))
 
         if wait:
             self._wait_for_joint(joint_config)
         else:
             time.sleep(0.5)  # 等待命令发送完成
-            self.tcp_socket.close()
-            self.tcp_socket = None
+            if self.tcp_socket is not None:
+                self.tcp_socket.close()
+                self.tcp_socket = None
 
     def move_j_p(self, tool_config: np.ndarray, k_acc: float = 1.0, k_vel: float = 1.0, wait: bool = True) -> None:
         """
@@ -191,14 +197,17 @@ class URRobot:
             k_acc * self.joint_acc, k_vel * self.joint_vel)
         tcp_command += "end\n"
 
-        self.tcp_socket.send(str.encode(tcp_command))
+        sock = self.tcp_socket
+        assert sock is not None
+        sock.send(str.encode(tcp_command))
 
         if wait:
             self._wait_for_pose(tool_config)
         else:
             time.sleep(0.5)
-            self.tcp_socket.close()
-            self.tcp_socket = None
+            if self.tcp_socket is not None:
+                self.tcp_socket.close()
+                self.tcp_socket = None
 
     def move_l(self, tool_config: np.ndarray, k_acc: float = 1.0, k_vel: float = 1.0, wait: bool = True) -> None:
         """
@@ -223,14 +232,17 @@ class URRobot:
             k_acc * self.tool_acc, k_vel * self.tool_vel)
         tcp_command += "end\n"
 
-        self.tcp_socket.send(str.encode(tcp_command))
+        sock = self.tcp_socket
+        assert sock is not None
+        sock.send(str.encode(tcp_command))
 
         if wait:
             self._wait_for_pose(tool_config)
         else:
             time.sleep(0.5)
-            self.tcp_socket.close()
-            self.tcp_socket = None
+            if self.tcp_socket is not None:
+                self.tcp_socket.close()
+                self.tcp_socket = None
 
     def go_home(self, home_config: Optional[np.ndarray] = None) -> None:
         """
@@ -240,7 +252,7 @@ class URRobot:
             home_config: 归位关节角度，默认使用标准归位姿态
         """
         if home_config is None:
-            home_config = [0, -np.pi/2, np.pi/2, -np.pi/2, 0, 0]
+            home_config = np.array([0, -np.pi/2, np.pi/2, -np.pi/2, 0, 0], dtype=np.float64)
         self.move_j(home_config)
 
     # ==================== 辅助函数 ====================
@@ -256,7 +268,7 @@ class URRobot:
         Returns:
             np.array: 解析后的数据
         """
-        dic = {
+        fmt_map: dict[str, str] = {
             'MessageSize': 'i', 'Time': 'd', 'q target': '6d', 'qd target': '6d', 'qdd target': '6d',
             'I target': '6d', 'M target': '6d', 'q actual': '6d', 'qd actual': '6d',
             'I actual': '6d', 'I control': '6d', 'Tool vector actual': '6d', 'TCP speed actual': '6d',
@@ -269,17 +281,18 @@ class URRobot:
             'V actual': '6d', 'Digital outputs': 'd', 'Program state': 'd',
             'Elbow position': 'd', 'Elbow velocity': '3d'
         }
+        parsed: dict[str, tuple[Any, ...]] = {}
 
         pos = 0
-        for key, fmt in dic.items():
+        for key, fmt in fmt_map.items():
             fmtsize = struct.calcsize(fmt)
             data_chunk, data = data[:fmtsize], data[fmtsize:]
-            dic[key] = struct.unpack("!" + fmt, data_chunk)
+            parsed[key] = struct.unpack("!" + fmt, data_chunk)
 
         if subpackage == 'joint_data':
-            return np.array(dic['q actual'])
+            return np.array(parsed['q actual'], dtype=np.float64)
         elif subpackage == 'cartesian_info':
-            return np.array(dic['Tool vector actual'])
+            return np.array(parsed['Tool vector actual'], dtype=np.float64)
         else:
             raise ValueError(f"Unknown subpackage: {subpackage}")
 
@@ -294,8 +307,9 @@ class URRobot:
             if all(np.abs(current_joints[i] - target_joints[i]) < self.joint_tolerance for i in range(6)):
                 break
             time.sleep(0.01)
-        self.tcp_socket.close()
-        self.tcp_socket = None
+        if self.tcp_socket is not None:
+            self.tcp_socket.close()
+            self.tcp_socket = None
         time.sleep(0.5)  # 等待机械臂稳定
 
     def _wait_for_pose(self, target_pose: np.ndarray, timeout: float = 30) -> None:
@@ -309,8 +323,9 @@ class URRobot:
             if all(np.abs(current_pose[i] - target_pose[i]) < self.tool_pose_tolerance[i] for i in range(3)):
                 break
             time.sleep(0.01)
-        self.tcp_socket.close()
-        self.tcp_socket = None
+        if self.tcp_socket is not None:
+            self.tcp_socket.close()
+            self.tcp_socket = None
         time.sleep(0.5)  # 等待机械臂稳定
 
     # ==================== 坐标变换 ====================
@@ -340,7 +355,7 @@ class URRobot:
         rot_z = np.array([[np.cos(y), -np.sin(y), 0],
                           [np.sin(y), np.cos(y), 0],
                           [0, 0, 1]])
-        return rot_z @ rot_y @ rot_x
+        return np.asarray(rot_z @ rot_y @ rot_x, dtype=np.float64)
 
     @staticmethod
     def R_to_rpy(R: np.ndarray) -> np.ndarray:
@@ -355,7 +370,7 @@ class URRobot:
             r = np.arctan2(-R[1, 2], R[1, 1])
             p = np.arctan2(-R[2, 0], sy)
             y = 0
-        return np.array([r, p, y])
+        return np.array([r, p, y], dtype=np.float64)
 
     @staticmethod
     def R_to_rotvec(R: np.ndarray) -> np.ndarray:
@@ -366,7 +381,7 @@ class URRobot:
         rx = (R[2, 1] - R[1, 2]) / (2 * np.sin(theta))
         ry = (R[0, 2] - R[2, 0]) / (2 * np.sin(theta))
         rz = (R[1, 0] - R[0, 1]) / (2 * np.sin(theta))
-        return np.array([rx, ry, rz]) * theta
+        return np.asarray(np.array([rx, ry, rz], dtype=np.float64) * theta, dtype=np.float64)
 
     @staticmethod
     def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
@@ -378,7 +393,7 @@ class URRobot:
         K = np.array([[0, -k[2], k[1]],
                       [k[2], 0, -k[0]],
                       [-k[1], k[0], 0]])
-        return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+        return np.asarray(np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K), dtype=np.float64)
 
     @staticmethod
     def pose_to_transform(pose: np.ndarray) -> np.ndarray:
@@ -418,9 +433,11 @@ class URRobot:
     def is_in_workspace(self, pose: np.ndarray) -> bool:
         """检查位姿是否在工作空间内"""
         pos = pose[:3]
-        return (self.workspace_limits[0, 0] <= pos[0] <= self.workspace_limits[0, 1] and
-                self.workspace_limits[1, 0] <= pos[1] <= self.workspace_limits[1, 1] and
-                self.workspace_limits[2, 0] <= pos[2] <= self.workspace_limits[2, 1])
+        return bool(
+            self.workspace_limits[0, 0] <= pos[0] <= self.workspace_limits[0, 1] and
+            self.workspace_limits[1, 0] <= pos[1] <= self.workspace_limits[1, 1] and
+            self.workspace_limits[2, 0] <= pos[2] <= self.workspace_limits[2, 1]
+        )
 
 
 if __name__ == "__main__":

@@ -10,11 +10,19 @@ Supports teach-by-demo with keyboard workflow:
 
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 import numpy as np
 import cv2
 import threading
 import time
+
+# Set Qt font directory before importing cv2 to reduce runtime font warnings.
+_qt_font_dir = "/usr/share/fonts/truetype/dejavu"
+if os.path.isdir(_qt_font_dir):
+    os.environ.setdefault("QT_QPA_FONTDIR", _qt_font_dir)
+    os.environ.setdefault("OPENCV_QT_FONTDIR", _qt_font_dir)
+
+import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -39,9 +47,12 @@ class CalibDataCollector:
         self.mode = mode
 
         # Checkerboard config
-        cb_size = CHECKERBOARD_CONFIG['size']
-        cb_square = CHECKERBOARD_CONFIG['square_size']
-        self.extractor = CheckerboardExtractor(cb_size, cb_square)
+        cb_size_any = CHECKERBOARD_CONFIG['size']
+        cb_size_seq = cast(Sequence[int], cb_size_any)
+        cb_cols, cb_rows = int(cb_size_seq[0]), int(cb_size_seq[1])
+        cb_square = float(cast(float, CHECKERBOARD_CONFIG['square_size']))
+        self.extractor = CheckerboardExtractor((cb_cols, cb_rows), cb_square)
+        self.cb_size: Tuple[int, int] = (cb_cols, cb_rows)
 
         # Data save path
         self.data_path = get_data_path(mode)
@@ -60,13 +71,33 @@ class CalibDataCollector:
         self._frame_lock = threading.Lock()
 
         # Latest validated detection from Space key, consumed by Enter key
-        self._pending_detection = None
-        self.min_frames_required = max(6, int(CALIBRATION_CONFIG.get('min_calibration_points', 6)))
+        self._pending_detection: Optional[Dict[str, Any]] = None
+        min_pts = CALIBRATION_CONFIG.get('min_calibration_points', 6)
+        self.min_frames_required = max(6, int(cast(int, min_pts)))
+
+        
 
     def _ensure_dirs(self) -> None:
         """Ensure data directories exist"""
         os.makedirs(self.data_path['poses'], exist_ok=True)
         os.makedirs(self.data_path['images'], exist_ok=True)
+
+    def clear_old_data(self) -> None:
+        """Clear old calibration data before starting a new collection"""
+        import shutil
+        for dir_key in ['poses', 'images']:
+            dir_path = self.data_path.get(dir_key)
+            if dir_path and os.path.exists(dir_path):
+                # We could delete the entire directory and recreate it
+                # or just delete all files and subdirectories in it
+                for filename in os.listdir(dir_path):
+                    file_path = os.path.join(dir_path, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    except Exception as e:
+                        print(f"警告：无法删除旧文件 {file_path}: {e}")
+        print("已清理历史采集数据。")
 
     def get_frame_index(self) -> int:
         """Get next frame index"""
@@ -243,9 +274,38 @@ class CalibDataCollector:
         """
         rgb = frame_data['rgb'].copy()
         corners = frame_data['corners_refined']
+        if corners is None:
+            return
 
         # Draw corners
-        cv2.drawChessboardCorners(rgb, CHECKERBOARD_CONFIG['size'], corners, True)
+        cv2.drawChessboardCorners(rgb, self.cb_size, corners, True)
+
+        # Mark start/end corner to make corner ordering explicit.
+        if corners is not None and len(corners) > 0:
+            start_pt = tuple(corners[0, 0].astype(int))
+            end_pt = tuple(corners[-1, 0].astype(int))
+
+            cv2.circle(rgb, start_pt, 9, (0, 255, 255), -1)
+            cv2.putText(
+                rgb,
+                'START',
+                (start_pt[0] + 8, start_pt[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2
+            )
+
+            cv2.circle(rgb, end_pt, 9, (255, 0, 255), -1)
+            cv2.putText(
+                rgb,
+                'END',
+                (end_pt[0] + 8, end_pt[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 0, 255),
+                2
+            )
 
         # Display
         cv2.imshow('Corner Detection Result', rgb)
@@ -283,14 +343,34 @@ class CalibDataCollector:
 
         cv2.destroyWindow('Camera Preview')
 
+    def _update_preview_once(self) -> int:
+        """Render one preview frame in main thread and return keyboard key code."""
+        try:
+            rgb, _ = self.camera.get_data()
+            if rgb is None or rgb.size == 0 or rgb.mean() < 1.0:
+                return cv2.waitKey(30) & 0xFF
+
+            with self._frame_lock:
+                self._latest_frame = rgb.copy()
+
+            preview = rgb.copy()
+            cv2.putText(preview, "Space: detect  Enter: save  Esc: exit", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(preview, f"Collected: {self.frame_count} / Min: {self.min_frames_required}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
+            cv2.imshow('Camera Preview', preview)
+        except Exception as e:
+            print(f"Preview error: {e}")
+
+        return cv2.waitKey(30) & 0xFF
+
     def start_preview(self) -> None:
-        """Start real-time preview thread"""
+        """Prepare preview window (UI is updated in main thread)."""
         if self._preview_active:
             return
 
         self._preview_active = True
-        self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
-        self._preview_thread.start()
+        cv2.namedWindow('Camera Preview', cv2.WINDOW_NORMAL)
         print("Real-time preview started")
 
     def stop_preview(self) -> None:
@@ -298,6 +378,7 @@ class CalibDataCollector:
         self._preview_active = False
         if self._preview_thread:
             self._preview_thread.join(timeout=1.0)
+            self._preview_thread = None
         cv2.destroyAllWindows()
         print("Real-time preview stopped")
 
@@ -326,15 +407,15 @@ class CalibDataCollector:
         print("  Preview window continuously shows camera image")
         print("=" * 50)
 
-        # Start real-time preview
+        # Start preview window in main thread
         self.start_preview()
 
         while True:
-            key = cv2.waitKey(50) & 0xFF
+            key = self._update_preview_once()
 
             # Esc exits collection mode
             if key == 27:
-                print("\\nESC pressed. Exiting collection mode.")
+                print("\nESC pressed. Exiting collection mode.")
                 break
 
             # Space triggers detection preview
@@ -350,8 +431,9 @@ class CalibDataCollector:
                 saved = self.save_frame(self._pending_detection)
                 if saved:
                     self._pending_detection = None
+                    cv2.destroyWindow('Corner Detection Result')
 
-            time.sleep(0.02)
+            time.sleep(0.01)
 
         # Stop real-time preview
         self.stop_preview()
@@ -368,7 +450,7 @@ class CalibDataCollector:
         Returns:
             list: [{'tcp': 4x4 matrix, 'corners': corners, 'rgb': RGB image, 'depth': depth map}, ...]
         """
-        data = []
+        data: List[Dict[str, Any]] = []
         poses_dir = self.data_path['poses']
         images_dir = self.data_path['images']
 

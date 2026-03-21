@@ -7,7 +7,7 @@
 
 import numpy as np
 import cv2
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, cast
 
 
 class CheckerboardExtractor:
@@ -46,12 +46,16 @@ class CheckerboardExtractor:
             success: 检测是否成功
             corners: 角点坐标 (N, 1, 2)
             corners_refined: 亚像素级角点 (如果refine=True)
+
+        Note:
+            棋盘格检测可直接在原始图像上进行，不需要先传入畸变参数做矫正。
+            畸变参数主要在后续 solvePnP 估计位姿时使用。
         """
         # 检测棋盘格
         success, corners = cv2.findChessboardCorners(
             gray_image,
             self.checkerboard_size,
-            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+            flags=cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
         )
 
         if not success:
@@ -84,7 +88,7 @@ class CheckerboardExtractor:
         center_idx = (self.checkerboard_size[0] * self.checkerboard_size[1]) // 2
         center_corner = corners[center_idx, 0]
         center_px = np.round(center_corner).astype(int)
-        return center_px
+        return np.asarray(center_px, dtype=np.int32)
 
     def get_corners_3d(self, corners: np.ndarray, depth_image: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
         """
@@ -197,6 +201,7 @@ class CheckerboardExtractor:
                 'success': False,
                 'message': '未检测到棋盘格'
             }
+        assert corners_refined is not None
 
         # 获取中心像素坐标
         center_px = self.get_center_pixel(corners_refined)
@@ -223,6 +228,14 @@ class CheckerboardExtractor:
         # 可视化
         vis = color_image.copy()
         cv2.drawChessboardCorners(vis, self.checkerboard_size, corners_refined, success)
+        start_pt = tuple(corners_refined[0, 0].astype(int))
+        end_pt = tuple(corners_refined[-1, 0].astype(int))
+        cv2.circle(vis, start_pt, 9, (0, 255, 255), -1)
+        cv2.putText(vis, 'START', (start_pt[0] + 8, start_pt[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.circle(vis, end_pt, 9, (255, 0, 255), -1)
+        cv2.putText(vis, 'END', (end_pt[0] + 8, end_pt[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
         cv2.circle(vis, tuple(center_px), 10, (0, 255, 0), -1)  # 标记中心
 
         return {
@@ -257,6 +270,16 @@ def visualize_checkerboard(
     vis = color_image.copy()
     cv2.drawChessboardCorners(vis, checkerboard_size, corners, True)
 
+    if corners is not None and len(corners) > 0:
+        start_pt = tuple(corners[0, 0].astype(int))
+        end_pt = tuple(corners[-1, 0].astype(int))
+        cv2.circle(vis, start_pt, 9, (0, 255, 255), -1)
+        cv2.putText(vis, 'START', (start_pt[0] + 8, start_pt[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.circle(vis, end_pt, 9, (255, 0, 255), -1)
+        cv2.putText(vis, 'END', (end_pt[0] + 8, end_pt[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
     if center_idx is not None:
         center = corners[center_idx, 0]
         cv2.circle(vis, tuple(center.astype(int)), 15, (0, 255, 0), -1)
@@ -284,6 +307,8 @@ def load_and_process(
     """
     # 加载图像
     color_img = cv2.imread(image_path)
+    if color_img is None:
+        return {'success': False, 'message': f'无法读取图像: {image_path}'}
     depth_img = np.load(depth_path)
 
     # 提取特征

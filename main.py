@@ -7,7 +7,8 @@
 
 import sys
 import os
-from typing import Any, Dict, List
+import numpy as np
+from typing import List, Sequence, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -17,6 +18,15 @@ from calibration_solver import CalibrationSolver
 from error_calculator import ErrorCalculator
 from result_visualizer import ResultVisualizer
 from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG
+
+
+def _rough_pose_deg_to_rad(pose: List[float]) -> List[float]:
+    """Convert rough pose rotation vector from degree to radian."""
+    pose_rad = [float(v) for v in pose]
+    pose_rad[3] = float(np.deg2rad(pose_rad[3]))
+    pose_rad[4] = float(np.deg2rad(pose_rad[4]))
+    pose_rad[5] = float(np.deg2rad(pose_rad[5]))
+    return pose_rad
 
 
 def select_mode() -> str:
@@ -49,13 +59,19 @@ def load_rough_pose(mode: str) -> List[float]:
     """
     if mode == 'eye_on_hand':
         # Eye-on-Hand: 标定板相对于基座的位姿
-        pose = CHECKERBOARD_CONFIG.get('board_to_base_rough', [0, 0, 0, 0, 0, 0])
-        print(f"\n加载 Eye-on-Hand 粗略位姿 (标定板->基座): {pose}")
+        pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_base_rough', [0, 0, 0, 0, 0, 0])
+        pose_deg = [float(v) for v in cast(Sequence[float], pose_deg_any)]
+        pose = _rough_pose_deg_to_rad(pose_deg)
+        print(f"\n加载 Eye-on-Hand 粗略位姿(角度输入): {pose_deg}")
+        print(f"转换后用于计算(弧度): {pose}")
         return pose
     else:
         # Eye-to-Hand: 标定板相对于TCP的位姿
-        pose = CHECKERBOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
-        print(f"\n加载 Eye-to-Hand 粗略位姿 (标定板->TCP): {pose}")
+        pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
+        pose_deg = [float(v) for v in cast(Sequence[float], pose_deg_any)]
+        pose = _rough_pose_deg_to_rad(pose_deg)
+        print(f"\n加载 Eye-to-Hand 粗略位姿(角度输入): {pose_deg}")
+        print(f"转换后用于计算(弧度): {pose}")
         return pose
 
 
@@ -83,6 +99,10 @@ def main() -> None:
 
     robot = device_mgr.get_robot()
     camera = device_mgr.get_camera()
+    if robot is None or camera is None:
+        print("设备对象为空，请检查连接流程")
+        device_mgr.disconnect()
+        return
 
     # 3. 数据采集
     print("\n" + "=" * 50)
@@ -99,12 +119,14 @@ def main() -> None:
     choice = input("请输入选项 (1/2): ").strip()
 
     if choice == '1':
+        collector.clear_old_data()
         collector.collect_loop()
     else:
         data = collector.get_saved_data()
         print(f"已加载 {len(data)} 个已有数据点")
 
-    min_required = max(6, int(CALIBRATION_CONFIG.get('min_calibration_points', 6)))
+    min_required_cfg = CALIBRATION_CONFIG.get('min_calibration_points', 6)
+    min_required = max(6, int(cast(int, min_required_cfg)))
     current_count = len(collector.get_saved_data())
     if current_count < min_required:
         print(f"\n当前有效样本数: {current_count}，少于最小要求: {min_required}")
@@ -120,9 +142,13 @@ def main() -> None:
             return
 
     # 4. 标定计算
-    solver = CalibrationSolver(mode)
+    solver = CalibrationSolver(
+        mode,
+        intrinsics=camera.intrinsics,
+        dist_coeffs=getattr(camera, 'dist_coeffs', None)
+    )
     try:
-        robot_poses, camera_poses, corners_2d_list = solver.load_data(collector)
+        robot_poses, camera_poses, corners_2d_list, images = solver.load_data(collector)
     except ValueError as e:
         print(f"错误: {e}")
         print("请继续采集数据后重试，或退出流程。")
@@ -136,7 +162,7 @@ def main() -> None:
     print("误差计算")
     print("=" * 50)
 
-    error_calc = ErrorCalculator(mode)
+    error_calc = ErrorCalculator(mode, intrinsics=camera.intrinsics, dist_coeffs=camera.dist_coeffs)
 
     # 根据模式设置参数
     if mode == 'eye_on_hand':
@@ -144,11 +170,26 @@ def main() -> None:
             robot_poses, camera_poses, result['X'], result['z_scale'],
             board_to_base=rough_pose
         )
+        rotation_errors = error_calc.calculate_rotation_error(
+            robot_poses,
+            camera_poses,
+            result['X'],
+            board_to_base=rough_pose
+        )
     else:
         position_errors = error_calc.calculate_position_error(
             robot_poses, camera_poses, result['X'], result['z_scale'],
             board_to_tcp=rough_pose
         )
+        rotation_errors = error_calc.calculate_rotation_error(
+            robot_poses,
+            camera_poses,
+            result['X'],
+            board_to_tcp=rough_pose
+        )
+
+    # calculate_rotation_error returns radians; convert to degrees for display.
+    rotation_errors_deg = np.degrees(rotation_errors)
 
     reproj_errors = error_calc.calculate_reprojection_error(
         robot_poses,
@@ -158,8 +199,30 @@ def main() -> None:
         result['z_scale']
     )
 
-    error_calc.print_error_report(position_errors, "位置误差报告")
-    error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)")
+    error_calc.print_error_report(position_errors, "位置误差报告", unit='m')
+    error_calc.print_error_report(rotation_errors_deg, "旋转误差报告 (deg)", unit='deg')
+    error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)", unit='px')
+
+    show_reproj_frames = input("是否逐帧查看重投影角点对比? (y/n): ").strip().lower()
+    if show_reproj_frames == 'y':
+        if mode == 'eye_on_hand':
+            error_calc.visualize_reprojection_frames(
+                images,
+                robot_poses,
+                camera_poses,
+                corners_2d_list,
+                result['X'],
+                board_to_base=rough_pose
+            )
+        else:
+            error_calc.visualize_reprojection_frames(
+                images,
+                robot_poses,
+                camera_poses,
+                corners_2d_list,
+                result['X'],
+                board_to_tcp=rough_pose
+            )
 
     # 6. 可视化
     print("\n" + "=" * 50)
@@ -185,7 +248,14 @@ def main() -> None:
 
     show_errors = input("是否显示误差分布图? (y/n): ").strip().lower()
     if show_errors == 'y':
-        visualizer.visualize_errors(position_errors)
+        visualizer.visualize_position_rotation_errors(
+            position_errors,
+            rotation_errors_deg,
+            pos_unit='mm',
+            rot_unit='deg',
+            pos_scale=1000.0,
+            rot_scale=1.0
+        )
 
     # 7. 清理
     device_mgr.disconnect()

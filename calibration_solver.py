@@ -8,7 +8,7 @@ import numpy as np
 import os
 import sys
 import cv2
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,7 +20,12 @@ from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG, get_results_path, RE
 class CalibrationSolver:
     """手眼标定求解器"""
 
-    def __init__(self, mode: str) -> None:
+    def __init__(
+        self,
+        mode: str,
+        intrinsics: Optional[np.ndarray] = None,
+        dist_coeffs: Optional[np.ndarray] = None
+    ) -> None:
         """
         初始化求解器
 
@@ -31,19 +36,32 @@ class CalibrationSolver:
         self.solver = HandEyeSolver(mode)
         self.optimizer = HandEyeOptimizer(mode)
 
-        # 相机内参
-        intr = REALSENSE_CONFIG['default_intrinsics']
-        self.intrinsics = np.array([
-            [intr['fx'], 0, intr['cx']],
-            [0, intr['fy'], intr['cy']],
-            [0, 0, 1]
-        ])
-        self.min_points_required = max(6, int(CALIBRATION_CONFIG.get('min_calibration_points', 6)))
+        # 相机内参（优先使用外部传入的真实内参）
+        if intrinsics is not None:
+            self.intrinsics = np.asarray(intrinsics, dtype=np.float64)
+        else:
+            intr_any = REALSENSE_CONFIG.get('default_intrinsics')
+            intr = cast(Dict[str, float], intr_any)
+            self.intrinsics = np.array([
+                [float(intr['fx']), 0, float(intr['cx'])],
+                [0, float(intr['fy']), float(intr['cy'])],
+                [0, 0, 1]
+            ], dtype=np.float64)
+        min_pts = CALIBRATION_CONFIG.get('min_calibration_points', 6)
+        self.min_points_required = max(6, int(cast(int, min_pts)))
+
+        if dist_coeffs is not None:
+            self.dist_coeffs = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1, 1)
+        else:
+            self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
     def _build_checkerboard_object_points(self) -> np.ndarray:
         """Build checkerboard object points in board coordinate system."""
-        cb_cols, cb_rows = CHECKERBOARD_CONFIG['size']
-        square = CHECKERBOARD_CONFIG['square_size']
+        cb_size_any = CHECKERBOARD_CONFIG['size']
+        cb_size_tuple = cast(tuple[int, int], cb_size_any)
+        cb_cols = int(cb_size_tuple[0])
+        cb_rows = int(cb_size_tuple[1])
+        square = float(cast(float, CHECKERBOARD_CONFIG['square_size']))
         objp = np.zeros((cb_cols * cb_rows, 3), dtype=np.float32)
         objp[:, :2] = np.mgrid[0:cb_cols, 0:cb_rows].T.reshape(-1, 2)
         objp *= square
@@ -89,7 +107,10 @@ class CalibrationSolver:
         T_avg[:3, 3] = np.mean(translations, axis=0)
         return T_avg
 
-    def load_data(self, data_collector: Any) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+    def load_data(
+        self,
+        data_collector: Any
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
         """
         加载采集的数据
 
@@ -100,8 +121,21 @@ class CalibrationSolver:
             robot_poses: 机器人位姿列表 (T_base_tcp)
             camera_poses: 相机观测位姿列表 (T_cam_board)
             corners_2d_list: 每帧角点像素坐标
+            images: 与有效帧对齐的 RGB 图像列表
         """
         saved_data = data_collector.get_saved_data()
+
+        # 若采集器携带实时相机内参，则覆盖默认内参。
+        collector_intrinsics = getattr(data_collector, 'intrinsics', None)
+        if collector_intrinsics is not None:
+            collector_intrinsics_np = np.asarray(collector_intrinsics, dtype=np.float64)
+            if collector_intrinsics_np.shape == (3, 3):
+                self.intrinsics = collector_intrinsics_np
+        collector_dist = getattr(data_collector, 'dist_coeffs', None)
+        if collector_dist is not None:
+            collector_dist_np = np.asarray(collector_dist, dtype=np.float64).reshape(-1, 1)
+            if collector_dist_np.shape[0] >= 4:
+                self.dist_coeffs = collector_dist_np
 
         if len(saved_data) < self.min_points_required:
             raise ValueError(
@@ -113,8 +147,9 @@ class CalibrationSolver:
         robot_poses = []
         camera_poses = []
         corners_2d_list = []
+        images = []
         objp = self._build_checkerboard_object_points()
-        dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+        dist_coeffs = self.dist_coeffs
 
         for d in saved_data:
             tcp = d['tcp']
@@ -142,13 +177,17 @@ class CalibrationSolver:
             robot_poses.append(tcp)
             camera_poses.append(camera_pose)
             corners_2d_list.append(corners_2d)
+            if d['rgb'] is not None:
+                images.append(d['rgb'])
+            else:
+                images.append(np.zeros((720, 1280, 3), dtype=np.uint8))
 
         if len(robot_poses) < self.min_points_required:
             raise ValueError(
                 f"有效数据不足: {len(robot_poses)}, 需要至少{self.min_points_required}个"
             )
 
-        return robot_poses, camera_poses, corners_2d_list
+        return robot_poses, camera_poses, corners_2d_list, images
 
     def solve(
         self,

@@ -7,7 +7,7 @@
 import numpy as np
 import sys
 import os
-from typing import Optional
+from typing import Optional, cast
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,8 +21,8 @@ class DeviceManager:
     """设备管理器 - 统一管理机械臂和相机连接"""
 
     def __init__(self) -> None:
-        self.robot = None
-        self.camera = None
+        self.robot: Optional[URRobot] = None
+        self.camera: Optional[RealSenseCamera] = None
         self.connected = False
 
     def connect(
@@ -51,10 +51,11 @@ class DeviceManager:
         # 连接机械臂
         if connect_robot:
             if robot_ip is None:
-                robot_ip = UR3_CONFIG['tcp_host_ip']
+                robot_ip = cast(str, UR3_CONFIG['tcp_host_ip'])
+            tcp_port = int(cast(int, UR3_CONFIG['tcp_port']))
             print(f"\n[1/2] 连接 UR3 机械臂: {robot_ip} ...")
             try:
-                self.robot = URRobot(robot_ip, UR3_CONFIG['tcp_port'])
+                self.robot = URRobot(robot_ip, tcp_port)
                 # 测试连接
                 pose = self.robot.get_tool_pose()
                 if pose is not None:
