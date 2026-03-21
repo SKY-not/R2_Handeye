@@ -52,7 +52,8 @@ CHECKERBOARD_CONFIG = {
     # 格式: [x, y, z, rx, ry, rz] - 平移(米), 旋转向量(角度)
     'board_to_base_rough': [0.0, 0.0, 0.0, 0, 0, 0],
     # Eye-to-Hand: 标定板相对于TCP(法兰盘中心)的粗略位姿
-    'board_to_tcp_rough': [0.095, 0, 0.010, 0, 180, 0],
+    # 'board_to_tcp_rough': [0.095, 0, 0.010, 0, 180, 0],
+    'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 0, 0],
 }
 
 # ============================================
@@ -68,6 +69,24 @@ CALIBRATION_CONFIG = {
     'z_scale_bounds': (0.95, 1.05),  # 深度缩放因子搜索范围
     'optimization_method': 'Nelder-Mead',
     'min_calibration_points': 6,  # 最少标定点数
+}
+
+# ============================================
+# AprilTag 目标抓取/到位测试配置 (tests)
+# ============================================
+APRILTAG_TEST_CONFIG = {
+    'mode': 'eye_to_hand',
+    'tag_family': 'tag36h11',
+    'tag_size': 0.01,  # AprilTag边长 (米)
+    'target_tag_id': 0,
+    'decision_margin_threshold': 20.0,
+    'axis_length': 0.030,  # 图像可视化坐标轴长度 (米)
+    # 目标: tag坐标系下TCP位姿 [x, y, z, rx, ry, rz]
+    # 平移单位米, 旋转为Rodrigues旋转向量(弧度)
+    't_tag_tcp_target': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    'rtde_velocity': 0.05,
+    'rtde_acceleration': 0.05,
+    'dry_run': False,
 }
 
 # ============================================
