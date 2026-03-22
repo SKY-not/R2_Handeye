@@ -83,20 +83,10 @@ APRILTAG_TEST_CONFIG = {
     'axis_length': 0.030,  # 图像可视化坐标轴长度 (米)
     # 目标: tag坐标系下TCP位姿 [x, y, z, rx, ry, rz]
     # 平移单位米, 旋转为Rodrigues旋转向量(弧度)
-    't_tag_tcp_target': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    't_tag_tcp_target': [0.0, -0.10, -0.10, 0.0, 0.0, np.pi],
     'rtde_velocity': 0.05,
     'rtde_acceleration': 0.05,
     'dry_run': False,
-}
-
-# ============================================
-# 采样配置
-# ============================================
-SAMPLING_CONFIG = {
-    'grid_step': 0.05,  # 网格采样间距 (米)
-    'num_samples': 30,  # 自动采样数量
-    'sampling_method': 'grid',  # 'grid', 'random', 'adaptive'
-    'min_distance_from_teach': 0.03,  # 采样点与示教点的最小距离
 }
 
 # ============================================
