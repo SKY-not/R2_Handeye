@@ -94,11 +94,17 @@ class HandEyeOptimizer:
                         if self.mode == 'eye_on_hand':
                             T_world = robot_poses[i] @ X @ T_cam
                         else:
-                            T_world = robot_poses[i] @ T_cam @ X
-
-                        # 计算与理论值的误差 (这里简化处理)
-                        # 实际应用中需要更复杂的误差定义
-                        pass
+                            T_world = self.solver.invert_transform(robot_poses[i]) @ X @ T_cam
+                            
+                        if i == 0:
+                            T_world_ref = T_world
+                            T_world_ref_inv = self.solver.invert_transform(T_world_ref)
+                            errors.append(np.zeros(6, dtype=np.float64))
+                        else:
+                            # 相对误差 T_world * T_world_ref^-1 应该接近单位阵
+                            E = T_world @ T_world_ref_inv
+                            error_pose = self.solver.mat_to_pose(E)
+                            errors.append(error_pose)
 
                     else:
                         # 3D点形式

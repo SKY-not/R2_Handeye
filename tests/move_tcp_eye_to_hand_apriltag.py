@@ -191,6 +191,31 @@ def _transform_to_pose(tf: np.ndarray) -> np.ndarray:
     return np.concatenate([t, rvec.reshape(3)], axis=0)
 
 
+def _invert_transform(tf: np.ndarray) -> np.ndarray:
+    """Invert homogeneous transform."""
+    rot = tf[:3, :3]
+    trans = tf[:3, 3]
+    inv_tf = np.eye(4, dtype=np.float64)
+    inv_tf[:3, :3] = rot.T
+    inv_tf[:3, 3] = -rot.T @ trans
+    return inv_tf
+
+
+def _format_pose_xyz_rpy(pose: np.ndarray) -> tuple[str, str]:
+    """Format 6D TCP pose into two compact overlay lines."""
+    return (
+        f"x={pose[0]:+.4f} y={pose[1]:+.4f} z={pose[2]:+.4f}",
+        f"rx={pose[3]:+.4f} ry={pose[4]:+.4f} rz={pose[5]:+.4f}",
+    )
+
+
+def _pose_delta_metrics(current_pose: np.ndarray, target_pose: np.ndarray) -> tuple[float, float]:
+    """Return translation (m) and rotation-vector (rad) deltas between two TCP poses."""
+    pos_err = float(np.linalg.norm(current_pose[:3] - target_pose[:3]))
+    rot_err = float(np.linalg.norm(current_pose[3:6] - target_pose[3:6]))
+    return pos_err, rot_err
+
+
 def _draw_tag_overlay(
     image: np.ndarray,
     detection: Any,
@@ -245,14 +270,20 @@ def _draw_tag_overlay(
     cv2.line(image, origin, tuple(pts[3]), (255, 0, 0), 2)
 
 
-def _draw_target_frame_overlay(
+def _draw_frame_overlay(
     image: np.ndarray,
-    t_camera_target: np.ndarray,
+    t_camera_frame: np.ndarray,
     camera_matrix: np.ndarray,
     axis_length: float,
+    label: str,
+    origin_color: tuple[int, int, int] = (255, 255, 255),
+    thickness: int = 3,
 ) -> None:
-    rvec, _ = cv2.Rodrigues(t_camera_target[:3, :3])
-    tvec = t_camera_target[:3, 3].reshape(3, 1)
+    if float(t_camera_frame[2, 3]) <= 1e-6:
+        return
+
+    rvec, _ = cv2.Rodrigues(t_camera_frame[:3, :3])
+    tvec = t_camera_frame[:3, 3].reshape(3, 1)
 
     axis_points = np.array(
         [
@@ -273,18 +304,17 @@ def _draw_target_frame_overlay(
     pts = img_points.reshape(-1, 2).astype(np.int32)
     origin = tuple(pts[0])
 
-    # 使用更粗线宽和原点标记，突出显示目标TCP坐标系。
-    cv2.circle(image, origin, 5, (255, 255, 255), -1)
-    cv2.line(image, origin, tuple(pts[1]), (0, 0, 255), 3)
-    cv2.line(image, origin, tuple(pts[2]), (0, 255, 0), 3)
-    cv2.line(image, origin, tuple(pts[3]), (255, 0, 0), 3)
+    cv2.circle(image, origin, 5, origin_color, -1)
+    cv2.line(image, origin, tuple(pts[1]), (0, 0, 255), thickness)
+    cv2.line(image, origin, tuple(pts[2]), (0, 255, 0), thickness)
+    cv2.line(image, origin, tuple(pts[3]), (255, 0, 0), thickness)
     cv2.putText(
         image,
-        "TCP target",
+        label,
         (origin[0] + 8, origin[1] + 18),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
-        (255, 255, 255),
+        origin_color,
         2,
         cv2.LINE_AA,
     )
@@ -336,6 +366,7 @@ def main() -> None:
     cfg = _build_runtime_config(args)
 
     t_base_camera = _load_transform(cfg.handeye_file)
+    t_camera_base = _invert_transform(t_base_camera)
     t_tag_tcp_target = _pose_to_transform(cfg.t_tag_tcp_target)
 
     camera = RealSenseCamera()
@@ -362,6 +393,11 @@ def main() -> None:
     optimal_intr: Optional[np.ndarray] = None
     live_target_pose: Optional[np.ndarray] = None
     locked_target_pose: Optional[np.ndarray] = None
+    actual_tcp_pose: Optional[np.ndarray] = None
+
+    # 到达判定阈值: 平移 2mm, 旋转向量范数 0.02rad
+    pos_arrival_threshold_m = 0.002
+    rot_arrival_threshold_rad = 0.02
 
     try:
         while True:
@@ -383,11 +419,14 @@ def main() -> None:
                 t_camera_tcp_target = t_camera_tag @ t_tag_tcp_target
                 t_base_tcp_target = t_base_camera @ t_camera_tag @ t_tag_tcp_target
                 live_target_pose = _transform_to_pose(t_base_tcp_target)
-                _draw_target_frame_overlay(
+                _draw_frame_overlay(
                     undistorted,
                     t_camera_tcp_target,
                     optimal_intr,
                     cfg.axis_length,
+                    label="TCP target",
+                    origin_color=(255, 255, 255),
+                    thickness=3,
                 )
                 status_text = "TARGET DETECTED"
             else:
@@ -439,6 +478,65 @@ def main() -> None:
                     1,
                     cv2.LINE_AA,
                 )
+
+            if rtde_r is not None:
+                try:
+                    actual_tcp_pose = np.asarray(rtde_r.getActualTCPPose(), dtype=np.float64)
+                except Exception:
+                    actual_tcp_pose = None
+            else:
+                actual_tcp_pose = None
+
+            if actual_tcp_pose is not None and actual_tcp_pose.shape[0] >= 6:
+                t_base_tcp_actual = _pose_to_transform(actual_tcp_pose)
+                t_camera_tcp_actual = t_camera_base @ t_base_tcp_actual
+                _draw_frame_overlay(
+                    undistorted,
+                    t_camera_tcp_actual,
+                    optimal_intr,
+                    cfg.axis_length * 0.9,
+                    label="TCP actual",
+                    origin_color=(0, 255, 255),
+                    thickness=2,
+                )
+
+                line1, line2 = _format_pose_xyz_rpy(actual_tcp_pose)
+                cv2.putText(
+                    undistorted,
+                    f"actual tcp: {line1}",
+                    (20, 145),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    undistorted,
+                    f"           {line2}",
+                    (20, 168),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                if locked_target_pose is not None:
+                    pos_err, rot_err = _pose_delta_metrics(actual_tcp_pose, locked_target_pose)
+                    arrived = pos_err <= pos_arrival_threshold_m and rot_err <= rot_arrival_threshold_rad
+                    arrive_color = (0, 255, 0) if arrived else (0, 180, 255)
+                    arrive_text = "ARRIVED" if arrived else "MOVING"
+                    cv2.putText(
+                        undistorted,
+                        f"to lock: dpos={pos_err*1000:.2f}mm drot={rot_err:.3f}rad [{arrive_text}]",
+                        (20, 191),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        arrive_color,
+                        2,
+                        cv2.LINE_AA,
+                    )
 
             cv2.imshow("Eye-to-Hand AprilTag Target Move", undistorted)
             key = cv2.waitKey(1) & 0xFF

@@ -182,8 +182,15 @@ class HandEyeSolver:
         B_list = []  # 相机相对运动
 
         for i in range(n - 1):
-            A = self.compute_motion(robot_poses[i], robot_poses[i+1])
-            B = self.compute_motion(camera_poses[i], camera_poses[i+1])
+            if self.mode == 'eye_to_hand':
+                # Eye-to-Hand 直接求解 X = T_base_cam:
+                #   inv(T_base_tcp_i) * X * T_cam_board_i = inv(T_base_tcp_j) * X * T_cam_board_j
+                # => (T_base_tcp_j * inv(T_base_tcp_i)) * X = X * (T_cam_board_j * inv(T_cam_board_i))
+                A = np.asarray(robot_poses[i + 1] @ self.invert_transform(robot_poses[i]), dtype=np.float64)
+                B = np.asarray(camera_poses[i + 1] @ self.invert_transform(camera_poses[i]), dtype=np.float64)
+            else:
+                A = self.compute_motion(robot_poses[i], robot_poses[i + 1])
+                B = self.compute_motion(camera_poses[i], camera_poses[i + 1])
             A_list.append(A)
             B_list.append(B)
 

@@ -22,18 +22,23 @@ if os.path.isdir(_qt_font_dir):
     os.environ.setdefault("QT_QPA_FONTDIR", _qt_font_dir)
     os.environ.setdefault("OPENCV_QT_FONTDIR", _qt_font_dir)
 
-import cv2
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from calibration.feature_extractor import CheckerboardExtractor
-from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG, get_data_path
+from config import APRILTAG_CONFIG, CHECKERBOARD_CONFIG, CALIBRATION_CONFIG, get_data_path
+
+AprilTagDetector: Any = None
+try:
+    from pyapriltags import Detector as _AprilTagDetector
+    AprilTagDetector = _AprilTagDetector
+except ImportError:
+    AprilTagDetector = None
 
 
 class CalibDataCollector:
     """Calibration data collector"""
 
-    def __init__(self, robot: Any, camera: Any, mode: str) -> None:
+    def __init__(self, robot: Any, camera: Any, mode: str, backend: str = 'checkerboard') -> None:
         """
         Initialize data collector
 
@@ -45,6 +50,7 @@ class CalibDataCollector:
         self.robot = robot
         self.camera = camera
         self.mode = mode
+        self.backend = backend
 
         # Checkerboard config
         cb_size_any = CHECKERBOARD_CONFIG['size']
@@ -63,6 +69,20 @@ class CalibDataCollector:
 
         # Camera intrinsics
         self.intrinsics = camera.intrinsics
+        self.dist_coeffs = np.asarray(getattr(camera, 'dist_coeffs', np.zeros((5, 1))), dtype=np.float64).reshape(-1, 1)
+
+        # AprilTag backend config
+        self.apriltag_detector: Optional[Any] = None
+        self.apriltag_family = str(APRILTAG_CONFIG['family'])
+        self.apriltag_size = float(cast(float, APRILTAG_CONFIG['tag_size']))
+        self.apriltag_id = int(cast(int, APRILTAG_CONFIG['target_tag_id']))
+        self.apriltag_margin_th = float(cast(float, APRILTAG_CONFIG['decision_margin_threshold']))
+        self.apriltag_min_area_ratio = float(cast(float, APRILTAG_CONFIG['min_area_ratio']))
+
+        if self.backend == 'apriltag':
+            if AprilTagDetector is None:
+                raise ImportError("未安装 pyapriltags，无法使用 AprilTag 后端")
+            self.apriltag_detector = AprilTagDetector(families=self.apriltag_family)
 
         # Real-time preview control
         self._preview_active = False
@@ -137,7 +157,10 @@ class CalibDataCollector:
         # Convert to grayscale
         gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
 
-        # Detect corners
+        if self.backend == 'apriltag':
+            return self._capture_and_detect_apriltag(rgb, depth, gray)
+
+        # Detect checkerboard corners
         success, corners, corners_refined = self.extractor.detect_corners(gray, refine=True)
 
         if not success:
@@ -155,6 +178,81 @@ class CalibDataCollector:
             'depth': depth,
             'corners': corners,
             'corners_refined': corners_refined
+        }
+
+    def _capture_and_detect_apriltag(self, rgb: np.ndarray, depth: np.ndarray, gray: np.ndarray) -> Dict[str, Any]:
+        """Detect AprilTag on undistorted image and use pyapriltags direct pose output."""
+        if self.apriltag_detector is None:
+            return {'success': False, 'rgb': rgb, 'depth': depth}
+
+        h, w = gray.shape
+        intrinsics = np.asarray(self.intrinsics, dtype=np.float64)
+        new_k, _ = cv2.getOptimalNewCameraMatrix(
+            intrinsics,
+            self.dist_coeffs,
+            (w, h),
+            alpha=0,
+            newImgSize=(w, h)
+        )
+
+        undistorted_gray = cv2.undistort(gray, intrinsics, self.dist_coeffs, None, new_k)
+        undistorted_rgb = cv2.undistort(rgb, intrinsics, self.dist_coeffs, None, new_k)
+
+        camera_params = [
+            float(new_k[0, 0]),
+            float(new_k[1, 1]),
+            float(new_k[0, 2]),
+            float(new_k[1, 2]),
+        ]
+
+        detections = self.apriltag_detector.detect(
+            undistorted_gray,
+            estimate_tag_pose=True,
+            camera_params=camera_params,
+            tag_size=self.apriltag_size
+        )
+
+        target = None
+        for det in detections:
+            if int(det.tag_id) != self.apriltag_id:
+                continue
+            margin = float(getattr(det, 'decision_margin', 0.0))
+            corners_2d = np.asarray(det.corners, dtype=np.float64).reshape(-1, 2)
+            if corners_2d.shape[0] != 4:
+                continue
+            poly_area = float(abs(cv2.contourArea(corners_2d.astype(np.float32))))
+            area_ratio = poly_area / float(w * h)
+            if margin < self.apriltag_margin_th:
+                continue
+            if area_ratio < self.apriltag_min_area_ratio:
+                continue
+            target = det
+            break
+
+        if target is None:
+            return {
+                'success': False,
+                'rgb': rgb,
+                'depth': depth,
+                'corners': None,
+                'corners_refined': None
+            }
+
+        tag_pose = np.eye(4, dtype=np.float64)
+        tag_pose[:3, :3] = np.asarray(target.pose_R, dtype=np.float64).reshape(3, 3)
+        tag_pose[:3, 3] = np.asarray(target.pose_t, dtype=np.float64).reshape(3)
+
+        return {
+            'success': True,
+            'rgb': rgb,
+            'display_rgb': undistorted_rgb,
+            'depth': depth,
+            'tag_pose': tag_pose,
+            'tag_id': int(target.tag_id),
+            'tag_decision_margin': float(getattr(target, 'decision_margin', 0.0)),
+            'tag_corners': np.asarray(target.corners, dtype=np.float32).reshape(-1, 2),
+            'corners': None,
+            'corners_refined': None
         }
 
     def save_frame(self, frame_data: Dict[str, Any]) -> bool:
@@ -180,13 +278,26 @@ class CalibDataCollector:
         np.savetxt(tcp_path, tcp_pose, delimiter=' ')
         print(f"  TCP pose saved: {tcp_path}")
 
-        # 2. Save corner coordinates
-        corners = frame_data['corners_refined']
-        corners_path = os.path.join(self.data_path['poses'], f'corners_{idx:03d}.txt')
-        # Save as (N, 2) format
-        corners_reshaped = corners.reshape(-1, 2)
-        np.savetxt(corners_path, corners_reshaped, delimiter=' ')
-        print(f"  Corner coordinates saved: {corners_path}")
+        # 2. Save detection payload
+        if self.backend == 'apriltag':
+            tag_pose = np.asarray(frame_data.get('tag_pose'), dtype=np.float64)
+            if tag_pose.shape != (4, 4):
+                print("  [X] AprilTag pose 无效，不能保存")
+                return False
+            tag_pose_path = os.path.join(self.data_path['poses'], f'tag_pose_{idx:03d}.txt')
+            np.savetxt(tag_pose_path, tag_pose, delimiter=' ')
+            print(f"  Tag pose saved: {tag_pose_path}")
+
+            tag_corners = frame_data.get('tag_corners')
+            if tag_corners is not None:
+                tag_corners_path = os.path.join(self.data_path['poses'], f'tag_corners_{idx:03d}.txt')
+                np.savetxt(tag_corners_path, np.asarray(tag_corners).reshape(-1, 2), delimiter=' ')
+        else:
+            corners = frame_data['corners_refined']
+            corners_path = os.path.join(self.data_path['poses'], f'corners_{idx:03d}.txt')
+            corners_reshaped = corners.reshape(-1, 2)
+            np.savetxt(corners_path, corners_reshaped, delimiter=' ')
+            print(f"  Corner coordinates saved: {corners_path}")
 
         # 3. Save RGB image
         rgb_path = os.path.join(self.data_path['images'], f'rgb_{idx:03d}.png')
@@ -272,7 +383,31 @@ class CalibDataCollector:
         Args:
             frame_data: frame data
         """
-        rgb = frame_data['rgb'].copy()
+        rgb = frame_data.get('display_rgb', frame_data['rgb']).copy()
+
+        if self.backend == 'apriltag':
+            tag_corners = frame_data.get('tag_corners')
+            tag_id = frame_data.get('tag_id', -1)
+            tag_margin = frame_data.get('tag_decision_margin', 0.0)
+            if tag_corners is None:
+                return
+            pts = np.asarray(tag_corners, dtype=np.int32).reshape(-1, 2)
+            cv2.polylines(rgb, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+            center = np.mean(pts, axis=0).astype(int)
+            cv2.circle(rgb, tuple(center), 6, (0, 0, 255), -1)
+            cv2.putText(
+                rgb,
+                f'ID={tag_id} margin={float(tag_margin):.1f}',
+                (int(center[0]) + 10, int(center[1]) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2
+            )
+            cv2.imshow('Corner Detection Result', rgb)
+            cv2.waitKey(100)
+            return
+
         corners = frame_data['corners_refined']
         if corners is None:
             return
@@ -331,7 +466,8 @@ class CalibDataCollector:
 
                 # Display real-time preview
                 preview = rgb.copy()
-                cv2.putText(preview, "Space: detect  Enter: save  Esc: exit", (10, 30),
+                target_hint = "Space: detect target  Enter: save  Esc: exit"
+                cv2.putText(preview, target_hint, (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(preview, f"Collected: {self.frame_count} / Min: {self.min_frames_required}", (10, 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
@@ -354,7 +490,8 @@ class CalibDataCollector:
                 self._latest_frame = rgb.copy()
 
             preview = rgb.copy()
-            cv2.putText(preview, "Space: detect  Enter: save  Esc: exit", (10, 30),
+            target_hint = "Space: detect target  Enter: save  Esc: exit"
+            cv2.putText(preview, target_hint, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(preview, f"Collected: {self.frame_count} / Min: {self.min_frames_required}", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
@@ -398,9 +535,10 @@ class CalibDataCollector:
         print("\n" + "=" * 50)
         print("Start Loop Collection")
         print("=" * 50)
+        target_name = "AprilTag" if self.backend == 'apriltag' else "checkerboard corners"
         print("At each position:")
         print("  1. Move robot to new position (teach by demo)")
-        print("  2. Press Space to detect checkerboard corners")
+        print(f"  2. Press Space to detect {target_name}")
         print("  3. Press Enter to save current valid detection")
         print("  4. Press Esc to exit collection")
         print(f"  Minimum recommended frames: {self.min_frames_required}")
@@ -474,6 +612,12 @@ class CalibDataCollector:
             else:
                 corners = None
 
+            tag_pose_path = os.path.join(poses_dir, f'tag_pose_{idx}.txt')
+            if os.path.exists(tag_pose_path):
+                tag_pose = np.loadtxt(tag_pose_path)
+            else:
+                tag_pose = None
+
             # Load images
             rgb_path = os.path.join(images_dir, f'rgb_{idx}.png')
             rgb = cv2.imread(rgb_path) if os.path.exists(rgb_path) else None
@@ -484,6 +628,7 @@ class CalibDataCollector:
             data.append({
                 'tcp': tcp,
                 'corners': corners,
+                'tag_pose': tag_pose,
                 'rgb': rgb,
                 'depth': depth,
                 'index': idx

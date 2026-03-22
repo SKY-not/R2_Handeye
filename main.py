@@ -47,6 +47,24 @@ def select_mode() -> str:
             print("无效选择，请重新输入")
 
 
+def select_backend() -> str:
+    """选择特征后端"""
+    print("\n" + "=" * 50)
+    print("请选择特征后端:")
+    print("  1. Checkerboard (棋盘格)")
+    print("  2. AprilTag")
+    print("=" * 50)
+
+    while True:
+        choice = input("\n请输入选项 (1/2): ").strip()
+        if choice == '1':
+            return 'checkerboard'
+        elif choice == '2':
+            return 'apriltag'
+        else:
+            print("无效选择，请重新输入")
+
+
 def load_rough_pose(mode: str) -> List[float]:
     """
     加载粗略位姿
@@ -86,6 +104,9 @@ def main() -> None:
     mode_name = "Eye-on-Hand" if mode == "eye_on_hand" else "Eye-to-Hand"
     print(f"\n已选择: {mode_name}")
 
+    backend = select_backend()
+    print(f"已选择后端: {backend}")
+
     # 加载粗略位姿 (仅用于可视化/误差计算参考)
     rough_pose = load_rough_pose(mode)
 
@@ -109,7 +130,7 @@ def main() -> None:
     print("数据采集")
     print("=" * 50)
 
-    collector = CalibDataCollector(robot, camera, mode)
+    collector = CalibDataCollector(robot, camera, mode, backend=backend)
 
     # 询问是新建采集还是使用已有数据
     print("\n请选择:")
@@ -145,7 +166,8 @@ def main() -> None:
     solver = CalibrationSolver(
         mode,
         intrinsics=camera.intrinsics,
-        dist_coeffs=getattr(camera, 'dist_coeffs', None)
+        dist_coeffs=getattr(camera, 'dist_coeffs', None),
+        backend=backend
     )
     try:
         robot_poses, camera_poses, corners_2d_list, images = solver.load_data(collector)
@@ -162,7 +184,12 @@ def main() -> None:
     print("误差计算")
     print("=" * 50)
 
-    error_calc = ErrorCalculator(mode, intrinsics=camera.intrinsics, dist_coeffs=camera.dist_coeffs)
+    error_calc = ErrorCalculator(
+        mode,
+        intrinsics=camera.intrinsics,
+        dist_coeffs=camera.dist_coeffs,
+        backend=backend
+    )
 
     # 根据模式设置参数
     if mode == 'eye_on_hand':
@@ -191,38 +218,44 @@ def main() -> None:
     # calculate_rotation_error returns radians; convert to degrees for display.
     rotation_errors_deg = np.degrees(rotation_errors)
 
-    reproj_errors = error_calc.calculate_reprojection_error(
-        robot_poses,
-        camera_poses,
-        corners_2d_list,
-        result['X'],
-        result['z_scale']
-    )
+    reproj_errors = np.array([], dtype=np.float64)
+    if backend != 'apriltag':
+        reproj_errors = error_calc.calculate_reprojection_error(
+            robot_poses,
+            camera_poses,
+            corners_2d_list,
+            result['X'],
+            result['z_scale']
+        )
 
     error_calc.print_error_report(position_errors, "位置误差报告", unit='m')
     error_calc.print_error_report(rotation_errors_deg, "旋转误差报告 (deg)", unit='deg')
-    error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)", unit='px')
+    if backend != 'apriltag':
+        error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)", unit='px')
+    else:
+        print("\nAprilTag 后端已跳过重投影误差计算")
 
-    show_reproj_frames = input("是否逐帧查看重投影角点对比? (y/n): ").strip().lower()
-    if show_reproj_frames == 'y':
-        if mode == 'eye_on_hand':
-            error_calc.visualize_reprojection_frames(
-                images,
-                robot_poses,
-                camera_poses,
-                corners_2d_list,
-                result['X'],
-                board_to_base=rough_pose
-            )
-        else:
-            error_calc.visualize_reprojection_frames(
-                images,
-                robot_poses,
-                camera_poses,
-                corners_2d_list,
-                result['X'],
-                board_to_tcp=rough_pose
-            )
+    if backend != 'apriltag':
+        show_reproj_frames = input("是否逐帧查看重投影角点对比? (y/n): ").strip().lower()
+        if show_reproj_frames == 'y':
+            if mode == 'eye_on_hand':
+                error_calc.visualize_reprojection_frames(
+                    images,
+                    robot_poses,
+                    camera_poses,
+                    corners_2d_list,
+                    result['X'],
+                    board_to_base=rough_pose
+                )
+            else:
+                error_calc.visualize_reprojection_frames(
+                    images,
+                    robot_poses,
+                    camera_poses,
+                    corners_2d_list,
+                    result['X'],
+                    board_to_tcp=rough_pose
+                )
 
     # 6. 可视化
     print("\n" + "=" * 50)

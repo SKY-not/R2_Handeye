@@ -18,7 +18,13 @@ from config import CHECKERBOARD_CONFIG, REALSENSE_CONFIG
 class ErrorCalculator:
     """重投影误差计算器"""
 
-    def __init__(self, mode: str, intrinsics: Optional[np.ndarray] = None, dist_coeffs: Optional[np.ndarray] = None) -> None:
+    def __init__(
+        self,
+        mode: str,
+        intrinsics: Optional[np.ndarray] = None,
+        dist_coeffs: Optional[np.ndarray] = None,
+        backend: str = 'checkerboard'
+    ) -> None:
         """
         初始化误差计算器
 
@@ -28,6 +34,7 @@ class ErrorCalculator:
             dist_coeffs: 相机畸变参数
         """
         self.mode = mode
+        self.backend = backend
 
         # 相机内参（优先使用外部传入真实内参）
         if intrinsics is not None:
@@ -133,6 +140,10 @@ class ErrorCalculator:
         Returns:
             errors: 每帧的重投影误差 (像素)
         """
+        if self.backend == 'apriltag':
+            print("AprilTag 后端跳过重投影误差计算")
+            return np.array([], dtype=np.float64)
+
         if not (len(robot_poses) == len(camera_poses) == len(corners_2d_list)):
             raise ValueError("robot_poses/camera_poses/corners_2d_list 长度不一致")
 
@@ -324,6 +335,10 @@ class ErrorCalculator:
         - 左/右方向键（兼容 Shift+方向键）: 切换帧
         - Esc: 退出
         """
+        if self.backend == 'apriltag':
+            print('AprilTag 后端跳过逐帧重投影显示')
+            return
+
         n = min(len(images), len(robot_poses), len(camera_poses), len(corners_2d_list))
         if n == 0:
             print('无可视化数据，跳过逐帧重投影显示')

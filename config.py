@@ -53,7 +53,7 @@ CHECKERBOARD_CONFIG = {
     'board_to_base_rough': [0.0, 0.0, 0.0, 0, 0, 0],
     # Eye-to-Hand: 标定板相对于TCP(法兰盘中心)的粗略位姿
     # 'board_to_tcp_rough': [0.095, 0, 0.010, 0, 180, 0],
-    'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 0, 0],
+    'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 180, 0],
 }
 
 # ============================================
@@ -72,6 +72,17 @@ CALIBRATION_CONFIG = {
 }
 
 # ============================================
+# AprilTag 标定后端配置
+# ============================================
+APRILTAG_CONFIG = {
+    'family': 'tag36h11',
+    'tag_size': 0.03,  # 米
+    'target_tag_id': 1,
+    'decision_margin_threshold': 20.0,
+    'min_area_ratio': 0.0005,
+}
+
+# ============================================
 # AprilTag 目标抓取/到位测试配置 (tests)
 # ============================================
 APRILTAG_TEST_CONFIG = {
@@ -83,7 +94,7 @@ APRILTAG_TEST_CONFIG = {
     'axis_length': 0.030,  # 图像可视化坐标轴长度 (米)
     # 目标: tag坐标系下TCP位姿 [x, y, z, rx, ry, rz]
     # 平移单位米, 旋转为Rodrigues旋转向量(弧度)
-    't_tag_tcp_target': [0.0, -0.10, -0.10, 0.0, 0.0, 0.0],
+    't_tag_tcp_target': [0.0, 0.0, -0.10, 0.0, 0.0, np.pi],  # 目标位姿 (TCP在tag坐标系下)
     'rtde_velocity': 0.05,
     'rtde_acceleration': 0.05,
     'dry_run': False,

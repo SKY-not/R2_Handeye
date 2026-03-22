@@ -24,7 +24,8 @@ class CalibrationSolver:
         self,
         mode: str,
         intrinsics: Optional[np.ndarray] = None,
-        dist_coeffs: Optional[np.ndarray] = None
+        dist_coeffs: Optional[np.ndarray] = None,
+        backend: str = 'checkerboard'
     ) -> None:
         """
         初始化求解器
@@ -33,6 +34,7 @@ class CalibrationSolver:
             mode: 'eye_on_hand' 或 'eye_to_hand'
         """
         self.mode = mode
+        self.backend = backend
         self.solver = HandEyeSolver(mode)
         self.optimizer = HandEyeOptimizer(mode)
 
@@ -166,32 +168,46 @@ class CalibrationSolver:
         camera_poses = []
         corners_2d_list = []
         images = []
-        objp = self._build_checkerboard_object_points()
+        objp = self._build_checkerboard_object_points() if self.backend == 'checkerboard' else None
         dist_coeffs = self.dist_coeffs
 
         for d in saved_data:
             tcp = d['tcp']
-            corners = d['corners']
+            if self.backend == 'apriltag':
+                tag_pose = d.get('tag_pose')
+                if tag_pose is None:
+                    print(f"  警告: 帧 {d['index']} 缺少 tag_pose，跳过")
+                    continue
+                camera_pose = np.asarray(tag_pose, dtype=np.float64)
+                if camera_pose.shape != (4, 4):
+                    print(f"  警告: 帧 {d['index']} tag_pose 维度异常，跳过")
+                    continue
+                corners_2d = np.zeros((0, 2), dtype=np.float32)
+            else:
+                corners = d['corners']
 
-            if corners is None:
-                print(f"  警告: 帧 {d['index']} 数据不完整，跳过")
-                continue
+                if corners is None:
+                    print(f"  警告: 帧 {d['index']} 数据不完整，跳过")
+                    continue
 
-            corners_2d = corners.reshape(-1, 2).astype(np.float32)
-            ok, rvec, tvec = cv2.solvePnP(
-                objp,
-                corners_2d,
-                self.intrinsics,
-                dist_coeffs,
-                flags=cv2.SOLVEPNP_ITERATIVE
-            )
+                corners_2d = corners.reshape(-1, 2).astype(np.float32)
+                if objp is None:
+                    print(f"  警告: 帧 {d['index']} 缺少 checkerboard 点模型，跳过")
+                    continue
+                ok, rvec, tvec = cv2.solvePnP(
+                    objp,
+                    corners_2d,
+                    self.intrinsics,
+                    dist_coeffs,
+                    flags=cv2.SOLVEPNP_ITERATIVE
+                )
 
-            if not ok:
-                print(f"  警告: 帧 {d['index']} PnP求解失败，跳过")
-                continue
+                if not ok:
+                    print(f"  警告: 帧 {d['index']} PnP求解失败，跳过")
+                    continue
 
-            camera_pose = self._rvec_tvec_to_transform(rvec, tvec)
-            self._save_pnp_debug_data(str(d['index']), objp, corners_2d, camera_pose)
+                camera_pose = self._rvec_tvec_to_transform(rvec, tvec)
+                self._save_pnp_debug_data(str(d['index']), objp, corners_2d, camera_pose)
 
             robot_poses.append(tcp)
             camera_poses.append(camera_pose)
@@ -245,29 +261,34 @@ class CalibrationSolver:
             X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses_for_solver)
         else:
             # Eye-to-Hand:
-            # First solve Y = T_tcp_board from
-            #   inv(T_base_tcp_i) * T_base_tcp_j * Y = Y * inv(T_cam_board_i) * T_cam_board_j
-            Y_tcp_board = self.solver.solve_axxb_svd(robot_poses, camera_poses)
-
-            # Then recover X = T_base_cam from
-            #   T_base_tcp_i * Y = X * T_cam_board_i
-            X_candidates = [
-                tcp @ Y_tcp_board @ self._invert_transform(cam_pose)
-                for tcp, cam_pose in zip(robot_poses, camera_poses)
-            ]
-            X_svd = self._average_transforms(X_candidates)
+            # 直接求解 X = T_base_cam（在 solve_axxb_svd 内按 eye_to_hand 构建 A/B）
+            X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses)
         print("SVD 求解完成")
 
         # 打印SVD结果
         pos = X_svd[:3, 3]
         print(f"  位置: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] m")
 
-        # 2. 先使用稳定的AX=XB结果。后续可在全角点重投影目标上做非线性优化。
+        # 2. 非线性优化
         print("\n[2/2] 非线性优化...")
-        X_opt = X_svd
-        z_scale = 1.0
-        opt_result = None
-        print("当前版本使用SVD结果作为最终解")
+        try:
+            X_opt, z_scale, opt_result = self.optimizer.optimize(
+                robot_poses=robot_poses,
+                camera_data=camera_poses,
+                intrinsics=self.intrinsics,
+                initial_X=X_svd,
+                z_scale_init=1.0
+            )
+            print("非线性优化完成")
+            print(f"  优化是否成功: {opt_result.success}")
+            print(f"  最终目标函数值 (误差): {opt_result.fun:.6e}")
+        except Exception as e:
+            print(f"优化过程出现异常: {e}")
+            X_opt = X_svd
+            z_scale = 1.0
+            opt_result = None
+            print("回退使用SVD结果作为最终解")
+
         print(f"  深度缩放因子: {z_scale:.6f}")
 
         # 打印优化后结果
