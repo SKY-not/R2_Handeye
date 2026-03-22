@@ -9,8 +9,9 @@
 4) 按键触发后，使用 ur_rtde 1.6.0 通过 moveJ(getInverseKinematics) 执行运动
 
 按键:
-- q: 退出
-- m: 对当前目标执行移动(执行前终端二次确认)
+- Enter: 锁定当前目标位姿并立即执行运动
+- c: 清除已锁定目标位姿
+- Esc: 退出
 """
 
 from __future__ import annotations
@@ -330,14 +331,6 @@ def _detection_to_transform(detection: Any) -> np.ndarray:
     return tf
 
 
-def _prompt_confirm_move(target_pose: np.ndarray) -> bool:
-    print("\n================ MOVE CONFIRM ================")
-    print("目标TCP位姿 [x, y, z, rx, ry, rz]:")
-    print(np.array2string(target_pose, precision=6, suppress_small=False))
-    answer = input("确认执行 moveJ(getInverseKinematics)? [y/N]: ").strip().lower()
-    return answer == "y"
-
-
 def main() -> None:
     args = _parse_args()
     cfg = _build_runtime_config(args)
@@ -361,13 +354,14 @@ def main() -> None:
     if not cfg.dry_run:
         rtde_c, rtde_r = _create_rtde_interfaces(cfg.robot_ip)
 
-    print("\n开始循环: q=退出, m=执行目标运动")
+    print("\n开始循环: Enter=锁定并运动, c=清除锁定, Esc=退出")
     print(f"目标Tag ID: {cfg.target_tag_id}, 家族: {cfg.tag_family}, tag_size: {cfg.tag_size}m")
     if cfg.dry_run:
         print("当前为 dry-run 模式: 不发送运动命令")
 
     optimal_intr: Optional[np.ndarray] = None
-    last_target_pose: Optional[np.ndarray] = None
+    live_target_pose: Optional[np.ndarray] = None
+    locked_target_pose: Optional[np.ndarray] = None
 
     try:
         while True:
@@ -388,16 +382,16 @@ def main() -> None:
                 t_camera_tag = _detection_to_transform(target_det)
                 t_camera_tcp_target = t_camera_tag @ t_tag_tcp_target
                 t_base_tcp_target = t_base_camera @ t_camera_tag @ t_tag_tcp_target
-                last_target_pose = _transform_to_pose(t_base_tcp_target)
+                live_target_pose = _transform_to_pose(t_base_tcp_target)
                 _draw_target_frame_overlay(
                     undistorted,
                     t_camera_tcp_target,
                     optimal_intr,
                     cfg.axis_length,
                 )
-                status_text = "TARGET LOCKED"
+                status_text = "TARGET DETECTED"
             else:
-                last_target_pose = None
+                live_target_pose = None
 
             cv2.putText(
                 undistorted,
@@ -405,13 +399,13 @@ def main() -> None:
                 (20, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
-                (0, 255, 0) if last_target_pose is not None else (0, 0, 255),
+                (0, 255, 0) if live_target_pose is not None else (0, 0, 255),
                 2,
                 cv2.LINE_AA,
             )
             cv2.putText(
                 undistorted,
-                "keys: Enter=move, Esc=quit",
+                "keys: Enter=lock+move, c=clear lock, Esc=quit",
                 (20, 60),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -420,8 +414,8 @@ def main() -> None:
                 cv2.LINE_AA,
             )
 
-            if last_target_pose is not None:
-                pose_msg = "target pose: " + np.array2string(last_target_pose, precision=4, suppress_small=True)
+            if live_target_pose is not None:
+                pose_msg = "live pose: " + np.array2string(live_target_pose, precision=4, suppress_small=True)
                 cv2.putText(
                     undistorted,
                     pose_msg,
@@ -433,34 +427,53 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
 
+            if locked_target_pose is not None:
+                lock_msg = "locked pose: " + np.array2string(locked_target_pose, precision=4, suppress_small=True)
+                cv2.putText(
+                    undistorted,
+                    lock_msg,
+                    (20, 115),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+
             cv2.imshow("Eye-to-Hand AprilTag Target Move", undistorted)
             key = cv2.waitKey(1) & 0xFF
 
             if key == 27:
                 break
-            if key == 13:
-                if last_target_pose is None:
+            if key in (13, 10):
+                if live_target_pose is None:
                     print("未检测到有效目标Tag，忽略执行命令")
                     continue
-                if not _prompt_confirm_move(last_target_pose):
-                    print("用户取消执行")
-                    continue
+
+                locked_target_pose = live_target_pose.copy()
+                print("\n已锁定目标TCP位姿:")
+                print(np.array2string(locked_target_pose, precision=6, suppress_small=False))
 
                 if cfg.dry_run:
-                    print("dry-run: 已跳过机器人运动")
+                    print("dry-run: 已锁定并跳过机器人运动")
                     continue
 
                 assert rtde_c is not None
-                q_target = rtde_c.getInverseKinematics(last_target_pose.tolist())
+                q_target = rtde_c.getInverseKinematics(locked_target_pose.tolist())
                 if q_target is None or len(q_target) < 6:
                     print("IK求解失败，未执行运动")
                     continue
 
-                ok = rtde_c.moveJ(q_target, cfg.rtde_velocity, cfg.rtde_acceleration, False)
-                print(f"moveJ 发送结果: {ok}")
+                # Use asynchronous mode to keep image stream responsive during robot motion.
+                ok = rtde_c.moveJ(q_target, cfg.rtde_velocity, cfg.rtde_acceleration, True)
+                print(f"moveJ(异步) 发送结果: {ok}")
                 if rtde_r is not None:
                     actual_pose = np.asarray(rtde_r.getActualTCPPose(), dtype=np.float64)
                     print("当前实际TCP位姿:", np.array2string(actual_pose, precision=6, suppress_small=False))
+
+            if key in (ord('c'), ord('C')):
+                locked_target_pose = None
+                print("已清除锁定位姿")
     finally:
         if rtde_c is not None:
             try:

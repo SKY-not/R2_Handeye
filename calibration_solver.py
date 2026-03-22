@@ -107,6 +107,24 @@ class CalibrationSolver:
         T_avg[:3, 3] = np.mean(translations, axis=0)
         return T_avg
 
+    def _save_pnp_debug_data(
+        self,
+        frame_index: str,
+        objp: np.ndarray,
+        corners_2d: np.ndarray,
+        camera_pose: np.ndarray
+    ) -> None:
+        """Save per-frame PnP inputs/outputs for offline debugging."""
+        debug_dir = os.path.join(get_results_path(self.mode), 'pnp_debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        debug_path = os.path.join(debug_dir, f'pnp_{frame_index}.npz')
+        np.savez(
+            debug_path,
+            objp=np.asarray(objp, dtype=np.float32),
+            corners_2d=np.asarray(corners_2d, dtype=np.float32),
+            camera_pose=np.asarray(camera_pose, dtype=np.float64),
+        )
+
     def load_data(
         self,
         data_collector: Any
@@ -173,6 +191,7 @@ class CalibrationSolver:
                 continue
 
             camera_pose = self._rvec_tvec_to_transform(rvec, tvec)
+            self._save_pnp_debug_data(str(d['index']), objp, corners_2d, camera_pose)
 
             robot_poses.append(tcp)
             camera_poses.append(camera_pose)
