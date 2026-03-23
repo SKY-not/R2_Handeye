@@ -50,7 +50,7 @@ CHECKERBOARD_CONFIG = {
     # 粗略位姿 (仅用于可视化/误差计算参考，不参与标定求解)
     # Eye-on-Hand: 标定板相对于机器人基座的粗略位姿
     # 格式: [x, y, z, rx, ry, rz] - 平移(米), 旋转向量(角度)
-    'board_to_base_rough': [0.0, 0.0, 0.0, 0, 0, 0],
+    'board_to_base_rough': [-0.0553, -0.3491, 0.0437, -70.5, -163.36, 7.45],
     # Eye-to-Hand: 标定板相对于TCP(法兰盘中心)的粗略位姿
     # 'board_to_tcp_rough': [0.095, 0, 0.010, 0, 180, 0],
     'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 180, 0],
@@ -88,13 +88,13 @@ APRILTAG_CONFIG = {
 APRILTAG_TEST_CONFIG = {
     'mode': 'eye_to_hand',
     'tag_family': 'tag36h11',
-    'tag_size': 0.01,  # AprilTag边长 (米)
-    'target_tag_id': 0,
+    'tag_size': 0.03,  # AprilTag边长 (米)
+    'target_tag_id': 1,
     'decision_margin_threshold': 20.0,
     'axis_length': 0.030,  # 图像可视化坐标轴长度 (米)
     # 目标: tag坐标系下TCP位姿 [x, y, z, rx, ry, rz]
     # 平移单位米, 旋转为Rodrigues旋转向量(弧度)
-    't_tag_tcp_target': [0.0, 0.0, -0.10, 0.0, 0.0, np.pi],  # 目标位姿 (TCP在tag坐标系下)
+    't_tag_tcp_target': [0.0, 0.0, -0.30, 0.0, 0.0, np.pi],  # 目标位姿 (TCP在tag坐标系下)
     'rtde_velocity': 0.05,
     'rtde_acceleration': 0.05,
     'dry_run': False,

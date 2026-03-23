@@ -35,6 +35,7 @@ from config import APRILTAG_TEST_CONFIG, UR3_CONFIG
 
 @dataclass
 class RuntimeConfig:
+    mode: str
     robot_ip: str
     handeye_file: str
     tag_family: str
@@ -112,7 +113,7 @@ def _create_rtde_interfaces(robot_ip: str) -> tuple[Any, Any]:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Eye-to-Hand AprilTag TCP位姿到位测试")
+    parser = argparse.ArgumentParser(description="AprilTag TCP位姿到位测试 (支持 eye_to_hand / eye_on_hand)")
     parser.add_argument(
         "--robot-ip",
         type=str,
@@ -122,8 +123,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--handeye-file",
         type=str,
-        default=os.path.join(ROOT, "results", "eye_to_hand", "handeye_transform.txt"),
-        help="Eye-to-Hand结果矩阵文件路径"
+        default="",
+        help="手眼结果矩阵文件路径；为空时根据 mode 自动选择"
     )
     parser.add_argument(
         "--target-tag-id",
@@ -139,6 +140,21 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _select_mode_interactive() -> str:
+    print("\n请选择手眼模式:")
+    print("  1) eye_to_hand (眼在手外)")
+    print("  2) eye_on_hand (眼在手上)")
+    while True:
+        choice = input("请输入 1 或 2 (默认1): ").strip()
+        if choice == "":
+            return "eye_to_hand"
+        if choice == "1":
+            return "eye_to_hand"
+        if choice == "2":
+            return "eye_on_hand"
+        print("输入无效，请输入 1 或 2")
+
+
 def _build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     target_pose_any = APRILTAG_TEST_CONFIG.get("t_tag_tcp_target", [0, 0, 0.1, 0, 0, 0])
     if not isinstance(target_pose_any, Sequence) or len(target_pose_any) != 6:
@@ -147,9 +163,14 @@ def _build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     if target_pose.shape != (6,):
         raise ValueError("APRILTAG_TEST_CONFIG['t_tag_tcp_target'] 必须是6维 [x,y,z,rx,ry,rz]")
 
+    mode = _select_mode_interactive()
+    default_handeye_file = os.path.join(ROOT, "results", mode, "handeye_transform.txt")
+    handeye_file = str(args.handeye_file) if str(args.handeye_file).strip() else default_handeye_file
+
     cfg = RuntimeConfig(
+        mode=mode,
         robot_ip=args.robot_ip,
-        handeye_file=args.handeye_file,
+        handeye_file=handeye_file,
         tag_family=_cfg_str("tag_family", "tag36h11"),
         tag_size=_cfg_float("tag_size", 0.04),
         target_tag_id=int(args.target_tag_id),
@@ -365,8 +386,18 @@ def main() -> None:
     args = _parse_args()
     cfg = _build_runtime_config(args)
 
-    t_base_camera = _load_transform(cfg.handeye_file)
-    t_camera_base = _invert_transform(t_base_camera)
+    t_base_camera: Optional[np.ndarray] = None
+    t_camera_base: Optional[np.ndarray] = None
+    t_tcp_camera: Optional[np.ndarray] = None
+    t_camera_tcp: Optional[np.ndarray] = None
+
+    if cfg.mode == "eye_to_hand":
+        t_base_camera = _load_transform(cfg.handeye_file)
+        t_camera_base = _invert_transform(t_base_camera)
+    else:
+        t_tcp_camera = _load_transform(cfg.handeye_file)
+        t_camera_tcp = _invert_transform(t_tcp_camera)
+
     t_tag_tcp_target = _pose_to_transform(cfg.t_tag_tcp_target)
 
     camera = RealSenseCamera()
@@ -385,7 +416,8 @@ def main() -> None:
     if not cfg.dry_run:
         rtde_c, rtde_r = _create_rtde_interfaces(cfg.robot_ip)
 
-    print("\n开始循环: Enter=锁定并运动, c=清除锁定, Esc=退出")
+    print(f"\n模式: {cfg.mode}")
+    print("开始循环: Enter=锁定并运动, c=清除锁定, Esc=退出")
     print(f"目标Tag ID: {cfg.target_tag_id}, 家族: {cfg.tag_family}, tag_size: {cfg.tag_size}m")
     if cfg.dry_run:
         print("当前为 dry-run 模式: 不发送运动命令")
@@ -394,6 +426,7 @@ def main() -> None:
     live_target_pose: Optional[np.ndarray] = None
     locked_target_pose: Optional[np.ndarray] = None
     actual_tcp_pose: Optional[np.ndarray] = None
+    t_base_tag_lock: Optional[np.ndarray] = None
 
     # 到达判定阈值: 平移 2mm, 旋转向量范数 0.02rad
     pos_arrival_threshold_m = 0.002
@@ -413,12 +446,36 @@ def main() -> None:
             for det in detections:
                 _draw_tag_overlay(undistorted, det, optimal_intr, cfg.axis_length)
 
+            if rtde_r is not None:
+                try:
+                    actual_tcp_pose = np.asarray(rtde_r.getActualTCPPose(), dtype=np.float64)
+                except Exception:
+                    actual_tcp_pose = None
+            else:
+                actual_tcp_pose = None
+
+            t_base_tcp_actual: Optional[np.ndarray] = None
+            if actual_tcp_pose is not None and actual_tcp_pose.shape[0] >= 6:
+                t_base_tcp_actual = _pose_to_transform(actual_tcp_pose)
+
             status_text = "NO TARGET"
             if target_det is not None:
                 t_camera_tag = _detection_to_transform(target_det)
                 t_camera_tcp_target = t_camera_tag @ t_tag_tcp_target
-                t_base_tcp_target = t_base_camera @ t_camera_tag @ t_tag_tcp_target
-                live_target_pose = _transform_to_pose(t_base_tcp_target)
+
+                if cfg.mode == "eye_to_hand":
+                    assert t_base_camera is not None
+                    t_base_tcp_target = t_base_camera @ t_camera_tag @ t_tag_tcp_target
+                    live_target_pose = _transform_to_pose(t_base_tcp_target)
+                else:
+                    # Eye-on-Hand: 依赖当前TCP姿态估计 base->tag，再推算目标TCP。
+                    if t_base_tcp_actual is not None and t_tcp_camera is not None:
+                        t_base_tag_live = t_base_tcp_actual @ t_tcp_camera @ t_camera_tag
+                        t_base_tcp_target = t_base_tag_live @ t_tag_tcp_target
+                        live_target_pose = _transform_to_pose(t_base_tcp_target)
+                    else:
+                        live_target_pose = None
+
                 _draw_frame_overlay(
                     undistorted,
                     t_camera_tcp_target,
@@ -479,17 +536,15 @@ def main() -> None:
                     cv2.LINE_AA,
                 )
 
-            if rtde_r is not None:
-                try:
-                    actual_tcp_pose = np.asarray(rtde_r.getActualTCPPose(), dtype=np.float64)
-                except Exception:
-                    actual_tcp_pose = None
-            else:
-                actual_tcp_pose = None
-
             if actual_tcp_pose is not None and actual_tcp_pose.shape[0] >= 6:
-                t_base_tcp_actual = _pose_to_transform(actual_tcp_pose)
-                t_camera_tcp_actual = t_camera_base @ t_base_tcp_actual
+                assert t_base_tcp_actual is not None
+                if cfg.mode == "eye_to_hand":
+                    assert t_camera_base is not None
+                    t_camera_tcp_actual = t_camera_base @ t_base_tcp_actual
+                else:
+                    assert t_camera_tcp is not None
+                    t_camera_tcp_actual = t_camera_tcp
+
                 _draw_frame_overlay(
                     undistorted,
                     t_camera_tcp_actual,
@@ -538,7 +593,8 @@ def main() -> None:
                         cv2.LINE_AA,
                     )
 
-            cv2.imshow("Eye-to-Hand AprilTag Target Move", undistorted)
+            window_title = "Eye-to-Hand AprilTag Target Move" if cfg.mode == "eye_to_hand" else "Eye-on-Hand AprilTag Target Move"
+            cv2.imshow(window_title, undistorted)
             key = cv2.waitKey(1) & 0xFF
 
             if key == 27:
@@ -551,6 +607,11 @@ def main() -> None:
                 locked_target_pose = live_target_pose.copy()
                 print("\n已锁定目标TCP位姿:")
                 print(np.array2string(locked_target_pose, precision=6, suppress_small=False))
+
+                if cfg.mode == "eye_on_hand" and target_det is not None and t_base_tcp_actual is not None:
+                    assert t_tcp_camera is not None
+                    t_camera_tag_lock = _detection_to_transform(target_det)
+                    t_base_tag_lock = t_base_tcp_actual @ t_tcp_camera @ t_camera_tag_lock
 
                 if cfg.dry_run:
                     print("dry-run: 已锁定并跳过机器人运动")
@@ -571,6 +632,7 @@ def main() -> None:
 
             if key in (ord('c'), ord('C')):
                 locked_target_pose = None
+                t_base_tag_lock = None
                 print("已清除锁定位姿")
     finally:
         if rtde_c is not None:

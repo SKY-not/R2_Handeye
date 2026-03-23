@@ -190,7 +190,7 @@ class HandEyeSolver:
                 B = np.asarray(camera_poses[i + 1] @ self.invert_transform(camera_poses[i]), dtype=np.float64)
             else:
                 A = self.compute_motion(robot_poses[i], robot_poses[i + 1])
-                B = self.compute_motion(camera_poses[i], camera_poses[i + 1])
+                B = np.asarray(camera_poses[i] @ self.invert_transform(camera_poses[i+1]), dtype=np.float64)
             A_list.append(A)
             B_list.append(B)
 

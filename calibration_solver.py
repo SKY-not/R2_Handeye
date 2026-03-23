@@ -258,7 +258,7 @@ class CalibrationSolver:
             # Existing solver constructs B as inv(T1)*T2, so we invert all camera poses
             # to obtain B = T1 * inv(T2).
             camera_poses_for_solver = [self._invert_transform(T) for T in camera_poses]
-            X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses_for_solver)
+            X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses)
         else:
             # Eye-to-Hand:
             # 直接求解 X = T_base_cam（在 solve_axxb_svd 内按 eye_to_hand 构建 A/B）
