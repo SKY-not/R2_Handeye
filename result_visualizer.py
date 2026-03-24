@@ -10,37 +10,11 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.lines import Line2D
 import sys
 import os
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import CHECKERBOARD_CONFIG
-
-
-def pose_to_mat(pose: Union[np.ndarray, List[float]]) -> np.ndarray:
-    """Convert pose array to 4x4 transformation matrix"""
-    if isinstance(pose, np.ndarray) and pose.shape == (4, 4):
-        return pose
-
-    x, y, z, rx, ry, rz = pose
-
-    # Rotation vector to rotation matrix (Rodrigues)
-    theta = np.linalg.norm([rx, ry, rz])
-    if theta > 1e-6:
-        axis = np.array([rx, ry, rz]) / theta
-        K = np.array([
-            [0, -axis[2], axis[1]],
-            [axis[2], 0, -axis[0]],
-            [-axis[1], axis[0], 0]
-        ])
-        R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
-    else:
-        R = np.eye(3)
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = [x, y, z]
-    return T
+from calibration.transforms import pose_to_mat
 
 
 class ResultVisualizer:

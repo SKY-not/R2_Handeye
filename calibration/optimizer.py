@@ -7,7 +7,8 @@
 
 import numpy as np
 from scipy import optimize
-from typing import Any, Dict, List, Optional, Tuple
+from scipy.optimize import OptimizeResult
+from typing import List, Optional, Tuple
 
 from calibration.solver_axxb import HandEyeSolver
 
@@ -33,7 +34,7 @@ class HandEyeOptimizer:
         initial_X: Optional[np.ndarray] = None,
         z_scale_init: float = 1.0,
         z_scale_bounds: Tuple[float, float] = (0.95, 1.05)
-    ) -> Tuple[np.ndarray, float, Any]:
+    ) -> Tuple[np.ndarray, float, OptimizeResult]:
         """
         优化求解手眼变换
 
@@ -147,7 +148,7 @@ class HandEyeOptimizer:
         intrinsics: np.ndarray,
         initial_X: Optional[np.ndarray] = None,
         z_scale_init: float = 1.0
-    ) -> Tuple[np.ndarray, float, Any]:
+    ) -> Tuple[np.ndarray, float, OptimizeResult]:
         """
         使用重投影误差优化
 

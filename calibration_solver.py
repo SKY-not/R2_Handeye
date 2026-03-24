@@ -8,13 +8,24 @@ import numpy as np
 import os
 import sys
 import cv2
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from calibration.solver_axxb import HandEyeSolver
 from calibration.optimizer import HandEyeOptimizer
+from calibration.transforms import invert_transform
 from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG, get_results_path, REALSENSE_CONFIG
+
+
+class DataCollectorProtocol(Protocol):
+    """Minimal collector interface consumed by CalibrationSolver."""
+
+    intrinsics: np.ndarray
+    dist_coeffs: np.ndarray
+
+    def get_saved_data(self) -> Sequence[Mapping[str, Any]]:
+        ...
 
 
 class CalibrationSolver:
@@ -81,12 +92,7 @@ class CalibrationSolver:
     @staticmethod
     def _invert_transform(T: np.ndarray) -> np.ndarray:
         """Invert 4x4 homogeneous transform."""
-        R = T[:3, :3]
-        t = T[:3, 3]
-        T_inv = np.eye(4)
-        T_inv[:3, :3] = R.T
-        T_inv[:3, 3] = -R.T @ t
-        return T_inv
+        return invert_transform(T)
 
     @staticmethod
     def _average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
@@ -129,7 +135,7 @@ class CalibrationSolver:
 
     def load_data(
         self,
-        data_collector: Any
+        data_collector: DataCollectorProtocol
     ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
         """
         加载采集的数据
@@ -171,7 +177,8 @@ class CalibrationSolver:
         objp = self._build_checkerboard_object_points() if self.backend == 'checkerboard' else None
         dist_coeffs = self.dist_coeffs
 
-        for d in saved_data:
+        for d_any in saved_data:
+            d = cast(Dict[str, Any], d_any)
             tcp = d['tcp']
             if self.backend == 'apriltag':
                 tag_pose = d.get('tag_pose')

@@ -8,11 +8,12 @@ import numpy as np
 import cv2
 import sys
 import os
-from typing import Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import CHECKERBOARD_CONFIG, REALSENSE_CONFIG
+from calibration.transforms import invert_transform, pose_to_mat
 
 
 class ErrorCalculator:
@@ -60,30 +61,6 @@ class ErrorCalculator:
         self.cb_size: tuple[int, int] = (int(cb_size_tuple[0]), int(cb_size_tuple[1]))
         self.square_size: float = float(cast(float, CHECKERBOARD_CONFIG['square_size']))
 
-    @staticmethod
-    def _pose_to_mat(pose: Union[np.ndarray, List[float]]) -> np.ndarray:
-        """Convert [x,y,z,rx,ry,rz] pose to 4x4 matrix."""
-        if isinstance(pose, np.ndarray) and pose.shape == (4, 4):
-            return pose
-
-        x, y, z, rx, ry, rz = pose
-        theta = np.linalg.norm([rx, ry, rz])
-        if theta > 1e-8:
-            axis = np.array([rx, ry, rz]) / theta
-            K = np.array([
-                [0, -axis[2], axis[1]],
-                [axis[2], 0, -axis[0]],
-                [-axis[1], axis[0], 0]
-            ])
-            R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
-        else:
-            R = np.eye(3)
-
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = [x, y, z]
-        return T
-
     def _build_checkerboard_object_points(self) -> np.ndarray:
         """Build checkerboard corner points in board coordinate frame."""
         cb_cols, cb_rows = self.cb_size
@@ -91,16 +68,6 @@ class ErrorCalculator:
         objp[:, :2] = np.mgrid[0:cb_cols, 0:cb_rows].T.reshape(-1, 2)
         objp *= self.square_size
         return objp
-
-    @staticmethod
-    def _invert(T: np.ndarray) -> np.ndarray:
-        """Invert homogeneous transform."""
-        R = T[:3, :3]
-        t = T[:3, 3]
-        T_inv = np.eye(4)
-        T_inv[:3, :3] = R.T
-        T_inv[:3, 3] = -R.T @ t
-        return T_inv
 
     @staticmethod
     def _rotation_angle_error_rad(R1: np.ndarray, R2: np.ndarray) -> float:
@@ -153,13 +120,13 @@ class ErrorCalculator:
 
         if self.mode == 'eye_on_hand':
             if board_to_base is not None:
-                T_base_board_ref = self._pose_to_mat(board_to_base)
+                T_base_board_ref = pose_to_mat(board_to_base)
             else:
                 base_boards = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
                 T_base_board_ref = np.mean(np.stack(base_boards), axis=0)
 
             for tcp, corners in zip(robot_poses, corners_2d_list):
-                T_cam_board_pred = self._invert(X) @ self._invert(tcp) @ T_base_board_ref
+                T_cam_board_pred = invert_transform(X) @ invert_transform(tcp) @ T_base_board_ref
                 R = T_cam_board_pred[:3, :3]
                 t = T_cam_board_pred[:3, 3]
                 
@@ -180,13 +147,13 @@ class ErrorCalculator:
                 frame_errors.append(float(np.mean(err)))
         else:
             if board_to_tcp is not None:
-                T_tcp_board_ref = self._pose_to_mat(board_to_tcp)
+                T_tcp_board_ref = pose_to_mat(board_to_tcp)
             else:
-                base_to_tcp_board_list = [self._invert(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
+                base_to_tcp_board_list = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
                 T_tcp_board_ref = np.mean(np.stack(base_to_tcp_board_list), axis=0)
 
             for tcp, corners in zip(robot_poses, corners_2d_list):
-                T_cam_board_pred = self._invert(X) @ tcp @ T_tcp_board_ref
+                T_cam_board_pred = invert_transform(X) @ tcp @ T_tcp_board_ref
                 R = T_cam_board_pred[:3, :3]
                 t = T_cam_board_pred[:3, 3]
                 
@@ -244,7 +211,7 @@ class ErrorCalculator:
 
                 # 与粗略估计比较
                 if board_to_base is not None:
-                    T_expected = self._pose_to_mat(board_to_base)
+                    T_expected = pose_to_mat(board_to_base)
                     p_expected = T_expected[:3, 3]
                     error = float(np.linalg.norm(p_measured - p_expected))
                     errors.append(error)
@@ -256,7 +223,7 @@ class ErrorCalculator:
 
                 # 与粗略估计比较
                 if board_to_tcp is not None:
-                    T_board_tcp = self._pose_to_mat(board_to_tcp)
+                    T_board_tcp = pose_to_mat(board_to_tcp)
                     T_expected = tcp @ T_board_tcp
                     p_expected = T_expected[:3, 3]
                     error = float(np.linalg.norm(p_measured - p_expected))
@@ -289,7 +256,7 @@ class ErrorCalculator:
         if self.mode == 'eye_on_hand':
             measured_list = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
             if board_to_base is not None:
-                T_ref = self._pose_to_mat(board_to_base)
+                T_ref = pose_to_mat(board_to_base)
             else:
                 T_ref = np.mean(np.stack(measured_list), axis=0)
 
@@ -300,7 +267,7 @@ class ErrorCalculator:
         else:
             measured_list = [X @ cam_pose for cam_pose in camera_poses]
             if board_to_tcp is not None:
-                T_board_tcp = self._pose_to_mat(board_to_tcp)
+                T_board_tcp = pose_to_mat(board_to_tcp)
                 for tcp, T_meas in zip(robot_poses, measured_list):
                     T_ref = tcp @ T_board_tcp
                     angle_rad = self._rotation_angle_error_rad(T_meas[:3, :3], T_ref[:3, :3])
@@ -348,15 +315,15 @@ class ErrorCalculator:
 
         if self.mode == 'eye_on_hand':
             if board_to_base is not None:
-                T_base_board_ref = self._pose_to_mat(board_to_base)
+                T_base_board_ref = pose_to_mat(board_to_base)
             else:
                 base_boards = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses[:n], camera_poses[:n])]
                 T_base_board_ref = np.mean(np.stack(base_boards), axis=0)
         else:
             if board_to_tcp is not None:
-                T_tcp_board_ref = self._pose_to_mat(board_to_tcp)
+                T_tcp_board_ref = pose_to_mat(board_to_tcp)
             else:
-                tcp_board_list = [self._invert(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses[:n], camera_poses[:n])]
+                tcp_board_list = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses[:n], camera_poses[:n])]
                 T_tcp_board_ref = np.mean(np.stack(tcp_board_list), axis=0)
 
         idx = 0
@@ -373,9 +340,9 @@ class ErrorCalculator:
                     canvas = img_src.copy().astype(np.uint8)
 
             if self.mode == 'eye_on_hand':
-                T_cam_board_pred = self._invert(X) @ self._invert(robot_poses[idx]) @ T_base_board_ref
+                T_cam_board_pred = invert_transform(X) @ invert_transform(robot_poses[idx]) @ T_base_board_ref
             else:
-                T_cam_board_pred = self._invert(X) @ robot_poses[idx] @ T_tcp_board_ref
+                T_cam_board_pred = invert_transform(X) @ robot_poses[idx] @ T_tcp_board_ref
 
             R = T_cam_board_pred[:3, :3]
             t = T_cam_board_pred[:3, 3]

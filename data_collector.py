@@ -10,7 +10,7 @@ Supports teach-by-demo with keyboard workflow:
 
 import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, cast
 import numpy as np
 import cv2
 import threading
@@ -33,6 +33,32 @@ try:
     AprilTagDetector = _AprilTagDetector
 except ImportError:
     AprilTagDetector = None
+
+
+class CaptureFrameData(TypedDict, total=False):
+    """One captured frame and its detection payload."""
+
+    success: bool
+    rgb: np.ndarray
+    display_rgb: np.ndarray
+    depth: np.ndarray
+    corners: Optional[np.ndarray]
+    corners_refined: Optional[np.ndarray]
+    tag_pose: np.ndarray
+    tag_id: int
+    tag_decision_margin: float
+    tag_corners: np.ndarray
+
+
+class SavedFrameData(TypedDict):
+    """One persisted calibration sample loaded from disk."""
+
+    tcp: np.ndarray
+    corners: Optional[np.ndarray]
+    tag_pose: Optional[np.ndarray]
+    rgb: Optional[np.ndarray]
+    depth: Optional[np.ndarray]
+    index: str
 
 
 class CalibDataCollector:
@@ -91,7 +117,7 @@ class CalibDataCollector:
         self._frame_lock = threading.Lock()
 
         # Latest validated detection from Space key, consumed by Enter key
-        self._pending_detection: Optional[Dict[str, Any]] = None
+        self._pending_detection: Optional[CaptureFrameData] = None
         min_pts = CALIBRATION_CONFIG.get('min_calibration_points', 6)
         self.min_frames_required = max(6, int(cast(int, min_pts)))
 
@@ -104,7 +130,6 @@ class CalibDataCollector:
 
     def clear_old_data(self) -> None:
         """Clear old calibration data before starting a new collection"""
-        import shutil
         for dir_key in ['poses', 'images']:
             dir_path = self.data_path.get(dir_key)
             if dir_path and os.path.exists(dir_path):
@@ -134,7 +159,7 @@ class CalibDataCollector:
             return max(existing) + 1
         return 1
 
-    def capture_and_detect(self) -> Dict[str, Any]:
+    def capture_and_detect(self) -> 'CaptureFrameData':
         """
         Capture one frame and detect corners
 
@@ -180,7 +205,12 @@ class CalibDataCollector:
             'corners_refined': corners_refined
         }
 
-    def _capture_and_detect_apriltag(self, rgb: np.ndarray, depth: np.ndarray, gray: np.ndarray) -> Dict[str, Any]:
+    def _capture_and_detect_apriltag(
+        self,
+        rgb: np.ndarray,
+        depth: np.ndarray,
+        gray: np.ndarray
+    ) -> 'CaptureFrameData':
         """Detect AprilTag on undistorted image and use pyapriltags direct pose output."""
         if self.apriltag_detector is None:
             return {'success': False, 'rgb': rgb, 'depth': depth}
@@ -255,7 +285,7 @@ class CalibDataCollector:
             'corners_refined': None
         }
 
-    def save_frame(self, frame_data: Dict[str, Any]) -> bool:
+    def save_frame(self, frame_data: 'CaptureFrameData') -> bool:
         """
         Save one frame of data
 
@@ -265,7 +295,7 @@ class CalibDataCollector:
         Returns:
             bool: whether save is successful
         """
-        if not frame_data['success']:
+        if not frame_data.get('success', False):
             print("  [X] Corner detection failed, cannot save")
             return False
 
@@ -294,6 +324,9 @@ class CalibDataCollector:
                 np.savetxt(tag_corners_path, np.asarray(tag_corners).reshape(-1, 2), delimiter=' ')
         else:
             corners = frame_data['corners_refined']
+            if corners is None:
+                print("  [X] Corner detection payload 无效，不能保存")
+                return False
             corners_path = os.path.join(self.data_path['poses'], f'corners_{idx:03d}.txt')
             corners_reshaped = corners.reshape(-1, 2)
             np.savetxt(corners_path, corners_reshaped, delimiter=' ')
@@ -314,55 +347,6 @@ class CalibDataCollector:
 
         return True
 
-    def collect_single(self) -> bool:
-        """
-        Legacy single-frame collection helper.
-        Prefer using collect_loop keyboard workflow (Space/Enter/Esc).
-
-        Returns:
-            bool: whether save is successful
-        """
-        print("\n" + "=" * 50)
-        print("Single Frame Data Collection")
-        print("=" * 50)
-        print("Step 1: Press Enter to run one-shot corner detection")
-        print("Step 2: Press Enter again to confirm save")
-        print("        Press 'q' to cancel")
-        print("        Preview window will continuously show camera feed")
-        print("=" * 50)
-
-        # Wait for user to press Enter to show detection result
-        input()
-
-        # Capture and detect
-        frame_data = self.capture_and_detect()
-
-        if not frame_data['success']:
-            print("\nCorner detection failed, please adjust camera position")
-            return False
-
-        # Pause real-time preview, show corner detection result
-        self.stop_preview()
-        self._show_detection_result(frame_data)
-
-        # Wait for user confirmation
-        print("\nPress Enter to confirm save, or 'q' to cancel...")
-        key = input()
-        if key.lower() == 'q':
-            print("Cancelled")
-            # Resume real-time preview
-            self.start_preview()
-            return False
-
-        # Save data
-        result = self.save_frame(frame_data)
-
-        # Resume real-time preview display
-        cv2.destroyWindow('Corner Detection Result')
-        self.start_preview()
-
-        return result
-
     def detect_current_frame(self) -> bool:
         """Capture one frame, detect corners, and show the result for user confirmation."""
         frame_data = self.capture_and_detect()
@@ -376,7 +360,7 @@ class CalibDataCollector:
         print("[OK] Corner detection success. Press Enter to save this frame.")
         return True
 
-    def _show_detection_result(self, frame_data: Dict[str, Any]) -> None:
+    def _show_detection_result(self, frame_data: 'CaptureFrameData') -> None:
         """
         Show corner detection result
 
@@ -581,14 +565,14 @@ class CalibDataCollector:
             print(f"[!] Collected frames < recommended minimum ({self.min_frames_required}).")
         return self.frame_count
 
-    def get_saved_data(self) -> List[Dict[str, Any]]:
+    def get_saved_data(self) -> List['SavedFrameData']:
         """
         Get all saved data
 
         Returns:
             list: [{'tcp': 4x4 matrix, 'corners': corners, 'rgb': RGB image, 'depth': depth map}, ...]
         """
-        data: List[Dict[str, Any]] = []
+        data: List[SavedFrameData] = []
         poses_dir = self.data_path['poses']
         images_dir = self.data_path['images']
 
@@ -635,26 +619,3 @@ class CalibDataCollector:
             })
 
         return data
-
-
-def pose_to_mat(pose: np.ndarray) -> np.ndarray:
-    """Convert pose array to 4x4 transformation matrix"""
-    x, y, z, rx, ry, rz = pose
-
-    # Rotation vector to rotation matrix (Rodrigues)
-    theta = np.linalg.norm([rx, ry, rz])
-    if theta > 1e-6:
-        axis = np.array([rx, ry, rz]) / theta
-        K = np.array([
-            [0, -axis[2], axis[1]],
-            [axis[2], 0, -axis[0]],
-            [-axis[1], axis[0], 0]
-        ])
-        R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
-    else:
-        R = np.eye(3)
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = [x, y, z]
-    return T

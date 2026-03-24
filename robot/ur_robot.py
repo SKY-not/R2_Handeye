@@ -9,7 +9,6 @@ import socket
 import struct
 import time
 import numpy as np
-import math
 from typing import Any, Optional, cast
 
 

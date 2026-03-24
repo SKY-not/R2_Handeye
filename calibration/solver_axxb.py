@@ -8,8 +8,9 @@
 
 import numpy as np
 from scipy import optimize
-from scipy.linalg import expm, logm
-from typing import Any, List, Optional, Tuple
+from scipy.optimize import OptimizeResult
+from typing import List, Optional, Tuple
+from calibration.transforms import mat_to_pose, pose_to_mat, invert_transform
 
 
 class HandEyeSolver:
@@ -107,9 +108,7 @@ class HandEyeSolver:
         Returns:
             pose: [x, y, z, rx, ry, rz]
         """
-        pos = T[:3, 3]
-        rotvec = HandEyeSolver.log_rot(T[:3, :3])
-        return np.concatenate([pos, rotvec])
+        return mat_to_pose(T)
 
     @staticmethod
     def pose_to_mat(pose: np.ndarray) -> np.ndarray:
@@ -122,12 +121,7 @@ class HandEyeSolver:
         Returns:
             T: 4x4 齐次变换矩阵
         """
-        x, y, z, rx, ry, rz = pose
-        R = HandEyeSolver.exp_rot(np.array([rx, ry, rz]))
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = [x, y, z]
-        return T
+        return pose_to_mat(pose)
 
     @staticmethod
     def invert_transform(T: np.ndarray) -> np.ndarray:
@@ -140,12 +134,7 @@ class HandEyeSolver:
         Returns:
             T_inv: 逆变换矩阵
         """
-        R = T[:3, :3]
-        t = T[:3, 3]
-        T_inv = np.eye(4)
-        T_inv[:3, :3] = R.T
-        T_inv[:3, 3] = -R.T @ t
-        return T_inv
+        return invert_transform(T)
 
     # ==================== AX=XB 求解 ====================
 
@@ -298,7 +287,7 @@ class HandEyeSolver:
         depth_scales: Optional[List[float]] = None,
         initial_X: Optional[np.ndarray] = None,
         z_scale_init: float = 1.0
-    ) -> Tuple[np.ndarray, float, Any]:
+    ) -> Tuple[np.ndarray, float, OptimizeResult]:
         """
         带深度缩放因子的优化求解
 
