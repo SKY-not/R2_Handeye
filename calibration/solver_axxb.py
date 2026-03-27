@@ -136,21 +136,7 @@ class HandEyeSolver:
         """
         return invert_transform(T)
 
-    # ==================== AX=XB 求解 ====================
-
-    def compute_motion(self, T1: np.ndarray, T2: np.ndarray) -> np.ndarray:
-        """
-        计算两次位姿之间的相对变换
-
-        Args:
-            T1: 初始位姿 (4x4)
-            T2: 目标位姿 (4x4)
-
-        Returns:
-            delta_T: 相对变换 (4x4), 使得 T2 = delta_T @ T1
-        """
-        return np.asarray(self.invert_transform(T1) @ T2, dtype=np.float64)
-
+    # AX=XB 求解
     def solve_axxb_svd(self, robot_poses: List[np.ndarray], camera_poses: List[np.ndarray]) -> np.ndarray:
         """
         使用SVD方法求解 AX=XB
@@ -172,21 +158,13 @@ class HandEyeSolver:
 
         for i in range(n - 1):
             if self.mode == 'eye_to_hand':
-                # Eye-to-Hand 直接求解 X = T_base_cam:
-                #   inv(T_base_tcp_i) * X * T_cam_board_i = inv(T_base_tcp_j) * X * T_cam_board_j
-                # => (T_base_tcp_j * inv(T_base_tcp_i)) * X = X * (T_cam_board_j * inv(T_cam_board_i))
                 A = np.asarray(robot_poses[i + 1] @ self.invert_transform(robot_poses[i]), dtype=np.float64)
                 B = np.asarray(camera_poses[i + 1] @ self.invert_transform(camera_poses[i]), dtype=np.float64)
             else:
-                A = self.compute_motion(robot_poses[i], robot_poses[i + 1])
+                A = np.asarray(self.invert_transform(robot_poses[i]) @ robot_poses[i+1], dtype=np.float64)
                 B = np.asarray(camera_poses[i] @ self.invert_transform(camera_poses[i+1]), dtype=np.float64)
             A_list.append(A)
             B_list.append(B)
-
-        # 构建求解方程
-        # 对于每个相对运动: A_i * X = X * B_i
-        # 转化为: (I - A_i) * T_cg = T_cg * (I - B_i) 的线性化形式
-        # 或者使用对数方法
 
         # 使用 Tsai-Lenz 方法的变体
         rotations = []
@@ -208,6 +186,7 @@ class HandEyeSolver:
             translations.append(t_X)
 
         # 融合所有估计 (取中值)
+        # TODO: 可以改进为加权平均或使用 RANSAC 去除异常值，或者使用旋转向量取平均
         R_X = np.median(rotations, axis=0)
         # 确保是合法旋转矩阵
         U, _, Vt = np.linalg.svd(R_X)
@@ -236,6 +215,7 @@ class HandEyeSolver:
         Returns:
             R_X: 手眼旋转矩阵
         """
+        # TODO: 这里的求解方法有问题，或许是最初误差很大的原因
         # 使用SVD求解
         M = R_A @ R_B.T
         U, _, Vt = np.linalg.svd(M)
@@ -277,130 +257,6 @@ class HandEyeSolver:
 
         return np.asarray(t_X, dtype=np.float64)
 
-    # ==================== 带 z_scale 的优化 ====================
-
-    def solve_with_zscale(
-        self,
-        robot_poses: List[np.ndarray],
-        camera_poses: List[np.ndarray],
-        camera_intrinsics: np.ndarray,
-        depth_scales: Optional[List[float]] = None,
-        initial_X: Optional[np.ndarray] = None,
-        z_scale_init: float = 1.0
-    ) -> Tuple[np.ndarray, float, OptimizeResult]:
-        """
-        带深度缩放因子的优化求解
-
-        Args:
-            robot_poses: 机器人位姿列表 (4x4)
-            camera_poses: 相机观测到的标定板位姿列表 (4x4) 或 3D点列表
-            camera_intrinsics: 相机内参
-            depth_scales: 深度缩放因子列表 (可选)
-            initial_X: 初始手眼矩阵
-            z_scale_init: 初始深度缩放因子
-
-        Returns:
-            X: 优化后的手眼矩阵
-            z_scale: 优化后的深度缩放因子
-            result: 优化结果
-        """
-        n = len(robot_poses)
-
-        if initial_X is None:
-            # 先用SVD求解初始值
-            initial_X = self.solve_axxb_svd(robot_poses, camera_poses)
-
-        # 构建优化参数向量
-        # [x, y, z, rx, ry, rz, z_scale]
-        initial_params = np.zeros(7)
-        initial_params[:3] = initial_X[:3, 3]
-        initial_params[3:6] = self.log_rot(initial_X[:3, :3])
-        initial_params[6] = z_scale_init
-
-        # 优化目标函数
-        def objective(params: np.ndarray) -> float:
-            X = self.pose_to_mat(params[:6])
-            z_scale = params[6]
-
-            residual = []
-
-            for i in range(n):
-                # 使用中心点
-                if isinstance(camera_poses[i], np.ndarray) and camera_poses[i].shape[0] == 3:
-                    # 3D点，应用深度缩放
-                    p_cam = camera_poses[i].copy()
-                    if len(p_cam.shape) == 1:
-                        p_cam[2] *= z_scale
-                    else:
-                        p_cam[:, 2] *= z_scale
-
-                    # 转换到世界坐标
-                    p_world = X @ np.append(p_cam, 1)
-
-                    # 理论上的世界坐标点 (从机器人位姿)
-                    p_theory = robot_poses[i] @ np.append(
-                        self.get_checkerboard_center(), 1
-                    )
-
-                    # 残差
-                    residual.append(p_world[:3] - p_theory[:3])
-                else:
-                    # 使用位姿
-                    # 计算重投影误差
-                    H_cam = camera_poses[i]
-                    H_cam_scaled = self.apply_zscale(H_cam, z_scale)
-
-                    # 计算残差: A * X * B - X
-                    AXB = robot_poses[i] @ X @ H_cam_scaled
-                    error = self.mat_to_pose(AXB) - self.mat_to_pose(X)
-                    residual.append(error)
-
-            residual = np.concatenate(residual)
-            return float(np.sum(residual ** 2))
-
-        # 优化
-        result = optimize.minimize(
-            objective,
-            initial_params,
-            method='Nelder-Mead',
-            options={'maxiter': 1000, 'xatol': 1e-6, 'fatol': 1e-6}
-        )
-
-        # 提取结果
-        X_opt = self.pose_to_mat(result.x[:6])
-        z_scale_opt = result.x[6]
-
-        return X_opt, z_scale_opt, result
-
-    @staticmethod
-    def apply_zscale(T: np.ndarray, z_scale: float) -> np.ndarray:
-        """应用深度缩放"""
-        T_scaled = T.copy()
-        T_scaled[2, 3] *= z_scale
-        return T_scaled
-
-    @staticmethod
-    def get_checkerboard_center() -> np.ndarray:
-        """获取棋盘格中心的世界坐标 (需要根据实际标定板设置)"""
-        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
-
-    # ==================== 简化的求解方法 ====================
-
-    def solve_point_to_point(self, robot_positions: np.ndarray, camera_points_3d: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        简化方法: 点到点匹配求解
-
-        Args:
-            robot_positions: 机器人末端位置 (N, 3)
-            camera_points_3d: 相机坐标系下的3D点 (N, 3)
-
-        Returns:
-            X: 手眼变换矩阵
-            z_scale: 深度缩放因子
-        """
-        # 使用SVD求解刚体变换
-        return self.solve_rigid_transform(camera_points_3d, robot_positions)
-
     @staticmethod
     def solve_rigid_transform(A: np.ndarray, B: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -438,22 +294,6 @@ class HandEyeSolver:
         t = centroid_B - R @ centroid_A
 
         return R, t
-
-
-def solve_hand_eye(robot_poses: List[np.ndarray], camera_poses: List[np.ndarray], mode: str = 'eye_on_hand') -> np.ndarray:
-    """
-    便捷函数: 求解手眼标定
-
-    Args:
-        robot_poses: 机器人位姿列表
-        camera_poses: 相机位姿列表
-        mode: 'eye_on_hand' 或 'eye_to_hand'
-
-    Returns:
-        X: 手眼变换矩阵
-    """
-    solver = HandEyeSolver(mode)
-    return solver.solve_axxb_svd(robot_poses, camera_poses)
 
 
 if __name__ == "__main__":

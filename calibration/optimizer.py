@@ -140,6 +140,7 @@ class HandEyeOptimizer:
 
         return X_opt, z_scale_opt, result
 
+    # TODO: 目前仅使用了optimize函数，下面的优化方法暂未启用
     def optimize_with_reprojection(
         self,
         robot_poses: List[np.ndarray],

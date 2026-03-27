@@ -19,12 +19,13 @@ handeye/
 ├── error_calculator.py     # 误差计算
 ├── result_visualizer.py    # 结果可视化
 ├── calibration/            # 底层算法
+|   ├── svd.py             # SVD算法
 │   ├── solver_axxb.py     # SVD求解器
 │   ├── optimizer.py       # 非线性优化
-│   └── feature_extractor.py # 角点检测
+|   ├── transforms.py    # 坐标变换工具
+│   └── feature_extractor.py # 棋盘格角点检测
 ├── robot/                  # 机械臂驱动
-│   ├── ur_robot.py        # UR3通信
-│   └── gripper.py         # 夹爪驱动
+│   └── ur_robot.py        # UR3通信
 ├── camera/                 # 相机驱动
 │   └── realsense.py       # D405驱动
 ├── data/                   # 标定数据存储
@@ -50,6 +51,15 @@ CHECKERBOARD_CONFIG = {
     'board_to_base_rough': [x, y, z, rx, ry, rz],  # Eye-on-Hand粗略位姿
     'board_to_tcp_rough': [x, y, z, rx, ry, rz],   # Eye-to-Hand粗略位姿
 }
+
+# AprilTag参数
+APRILTAG_CONFIG = {
+    'family': 'tag36h11',
+    'tag_size': 0.03,  # 米
+    'target_tag_id': 1,
+    'decision_margin_threshold': 20.0,
+    'min_area_ratio': 0.0005,
+}
 ```
 
 ## 使用方法
@@ -63,23 +73,24 @@ python main.py
 ### 操作流程
 
 1. **选择模式**: 输入 `1` (Eye-on-Hand) 或 `2` (Eye-to-Hand)
-2. **自动连接**: 连接 UR3 和 D405
-3. **数据采集**:
-    - 人工移动机械臂到新位置（示教器人工示教）
-    - 按 `Space` 检测角点并显示结果
-    - 按 `Enter` 保存当前有效检测帧和TCP位姿
-    - 按 `Esc` 退出采集
-    - 至少采集 6 帧（建议更多）
-4. **自动计算**: 基于 AX=XB 的 SVD 求解
-5. **误差报告**: 显示位置参考误差 + 全角点重投影误差
-6. **可视化**: 3D显示坐标系，误差分布图
+2. **选择标定板**：输入 `1` (棋盘格) 或 `2` (AprilTag)
+3. **自动连接**: 连接 UR3 和 D405
+4. **数据采集**:
+   - 人工移动机械臂到新位置（示教器人工示教）
+   - 按 `Space` 检测角点并显示结果
+   - 按 `Enter` 保存当前有效检测帧和TCP位姿
+   - 按 `Esc` 退出采集
+   - 至少采集 6 帧（建议更多）
+5. **自动计算**: 基于 AX=XB 的 SVD 求解
+6. **误差报告**: 显示位置参考误差 + 全角点重投影误差
+7. **可视化**: 3D显示坐标系，误差分布图
 
 ## 标定模式
 
-| 模式 | 说明 | 求解目标 |
-|------|------|----------|
-| Eye-on-Hand | 相机在末端 | 相机→TCP 变换 |
-| Eye-to-Hand | 相机固定 | 相机→基座 变换 |
+| 模式        | 说明       | 求解目标       |
+| ----------- | ---------- | -------------- |
+| Eye-on-Hand | 相机在末端 | 相机→TCP 变换  |
+| Eye-to-Hand | 相机固定   | 相机→基座 变换 |
 
 ## 粗略位姿用途
 
@@ -99,6 +110,7 @@ results/{mode}/
 ## 误差指标
 
 - **位置参考误差**: 与粗略先验位姿对比（仅参考）
+- **旋转参考误差**: 与粗略先验位姿对比（仅参考）
 - **重投影误差**: 基于棋盘格全部角点的像素残差统计
 
 ## SVD特征实验 (data/svd)

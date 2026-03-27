@@ -96,7 +96,7 @@ def load_rough_pose(mode: str) -> List[float]:
 def main() -> None:
     """主函数"""
     print("=" * 50)
-    print("手眼标定系统 v2.0")
+    print("手眼标定系统")
     print("=" * 50)
 
     # 1. 选择模式
