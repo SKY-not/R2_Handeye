@@ -100,3 +100,35 @@ results/{mode}/
 
 - **位置参考误差**: 与粗略先验位姿对比（仅参考）
 - **重投影误差**: 基于棋盘格全部角点的像素残差统计
+
+## SVD特征实验 (data/svd)
+
+新增了基于 RealSense 的 RGB-D 保存与离线 SVD 特征提取流程，所有实验数据统一保存到 `data/svd`。
+
+### 1) 采集RGB-D帧
+
+```bash
+python tests/capture_svd_data.py
+```
+
+按键说明:
+
+- `Space`: 保存当前一帧到 `data/svd/images`
+- `Q` 或 `Esc`: 退出
+
+输出文件:
+
+- `data/svd/images/rgb_XXX.png`
+- `data/svd/images/depth_XXX.npy`
+- `data/svd/images/timestamps.csv`
+- `data/svd/images/camera_intrinsics.json`
+
+### 2) 离线SVD特征提取
+
+```bash
+python -m calibration.svd
+```
+
+输出文件:
+
+- `data/svd/svd_features.csv`

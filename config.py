@@ -52,8 +52,8 @@ CHECKERBOARD_CONFIG = {
     # 格式: [x, y, z, rx, ry, rz] - 平移(米), 旋转向量(角度)
     'board_to_base_rough': [-0.0553, -0.3491, 0.0437, -70.5, -163.36, 7.45],
     # Eye-to-Hand: 标定板相对于TCP(法兰盘中心)的粗略位姿
-    'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 180, 0],
-    # 'board_to_tcp_rough': [0, 0, 0.075, 0, -90, 0],
+    # 'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 180, 0],
+    'board_to_tcp_rough': [0.005, 0, 0.075, 0, -90, 0],
 }
 
 # ============================================
@@ -62,6 +62,16 @@ CHECKERBOARD_CONFIG = {
 CALIBRATION_MODES = ['eye_on_hand', 'eye_to_hand']
 
 # ============================================
+# SVD 采集与特征分析配置
+# ============================================
+SVD_CONFIG = {
+    'data_root': os.path.join(PROJECT_ROOT, 'data', 'svd'),
+    'images_dirname': 'images',
+    'features_filename': 'svd_features.csv',
+}
+
+# ============================================n
+
 # 标定参数配置
 # ============================================
 CALIBRATION_CONFIG = {
@@ -94,7 +104,8 @@ APRILTAG_TEST_CONFIG = {
     'axis_length': 0.030,  # 图像可视化坐标轴长度 (米)
     # 目标: tag坐标系下TCP位姿 [x, y, z, rx, ry, rz]
     # 平移单位米, 旋转为Rodrigues旋转向量(弧度)
-    't_tag_tcp_target': [0.0, 0.0, -0.30, 0.0, 0.0, np.pi],  # 目标位姿 (TCP在tag坐标系下)
+    # 't_tag_tcp_target': [0.0, -0.20, 0.20, 0.0, np.pi, 0.0],  # 目标位姿 (TCP在tag坐标系下) eye_to_hand
+    't_tag_tcp_target': [0.0, 0.0, -0.30, 0.0, 0.0, 0.0],  # 目标位姿 (TCP在tag坐标系下) eye_on_hand
     'rtde_velocity': 0.05,
     'rtde_acceleration': 0.05,
     'dry_run': False,
@@ -126,6 +137,18 @@ def get_data_path(mode: str) -> Dict[str, str]:
 def get_results_path(mode: str) -> str:
     """获取指定模式的结果路径"""
     return os.path.join(PROJECT_ROOT, 'results', mode)
+
+
+def get_svd_data_path() -> Dict[str, str]:
+    """获取 SVD 采集与分析数据路径。"""
+    data_root = str(SVD_CONFIG['data_root'])
+    images_dir = os.path.join(data_root, str(SVD_CONFIG['images_dirname']))
+    features_path = os.path.join(data_root, str(SVD_CONFIG['features_filename']))
+    return {
+        'root': data_root,
+        'images': images_dir,
+        'features': features_path,
+    }
 
 
 # ============================================

@@ -5,10 +5,13 @@ Intel RealSense D405 相机驱动
 支持RGB-D图像采集、内参获取
 """
 
+import json
+import os
+import time
 import numpy as np
 import pyrealsense2 as rs
 import cv2
-from typing import Any, Optional, Tuple, cast
+from typing import Any, Dict, Optional, Tuple, cast
 
 
 class RealSenseCamera:
@@ -260,6 +263,78 @@ class RealSenseCamera:
     def close(self) -> None:
         """关闭显示窗口"""
         cv2.destroyAllWindows()
+
+    def write_intrinsics_snapshot(self, output_root: str = "data/svd") -> str:
+        """Write one camera intrinsics snapshot for offline experiments."""
+        if not self.connected:
+            self.connect()
+
+        intrinsics = self.intrinsics
+        dist_coeffs = self.dist_coeffs
+        depth_scale = self.depth_scale
+        assert intrinsics is not None and dist_coeffs is not None and depth_scale is not None
+
+        images_dir = os.path.join(output_root, "images")
+        os.makedirs(images_dir, exist_ok=True)
+        snapshot_path = os.path.join(images_dir, "camera_intrinsics.json")
+
+        payload: Dict[str, Any] = {
+            "image_width": int(self.im_width),
+            "image_height": int(self.im_height),
+            "fps": int(self.fps),
+            "depth_scale": float(depth_scale),
+            "intrinsics": intrinsics.tolist(),
+            "dist_coeffs": dist_coeffs.reshape(-1).tolist(),
+            "captured_at_ns": int(time.time_ns()),
+        }
+
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        return snapshot_path
+
+    def save_rgbd_frame(
+        self,
+        frame_index: int,
+        output_root: str = "data/svd",
+        color_image: Optional[np.ndarray] = None,
+        depth_image: Optional[np.ndarray] = None,
+        timestamp_ns: Optional[int] = None,
+    ) -> Dict[str, str]:
+        """Save one RGB-D frame and append timestamp for offline analysis.
+
+        The color image is saved in OpenCV BGR channel order.
+        """
+        if frame_index <= 0:
+            raise ValueError("frame_index must be >= 1")
+
+        images_dir = os.path.join(output_root, "images")
+        os.makedirs(images_dir, exist_ok=True)
+
+        if color_image is None or depth_image is None:
+            color_image, depth_image = self.get_data()
+
+        rgb_path = os.path.join(images_dir, f"rgb_{frame_index:03d}.png")
+        depth_path = os.path.join(images_dir, f"depth_{frame_index:03d}.npy")
+        timestamps_path = os.path.join(images_dir, "timestamps.csv")
+
+        ok = cv2.imwrite(rgb_path, color_image)
+        if not ok:
+            raise RuntimeError(f"Failed to save RGB image to {rgb_path}")
+        np.save(depth_path, depth_image)
+
+        ts = int(time.time_ns() if timestamp_ns is None else timestamp_ns)
+        need_header = not os.path.exists(timestamps_path)
+        with open(timestamps_path, "a", encoding="utf-8") as f:
+            if need_header:
+                f.write("frame_idx,timestamp_ns\n")
+            f.write(f"{frame_index:03d},{ts}\n")
+
+        return {
+            "rgb_path": rgb_path,
+            "depth_path": depth_path,
+            "timestamps_path": timestamps_path,
+        }
 
 
 def test() -> None:
