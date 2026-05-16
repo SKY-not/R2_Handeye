@@ -67,6 +67,24 @@ APRILTAG_CONFIG = {
     'min_area_ratio': 0.0005,
 }
 
+# Four-AprilTag board calibration config.
+# Board frame: origin at board center, x right, y down, z inward normal.
+APRILTAG_BOARD_CONFIG = {
+    'family': 'tag36h11',
+    'tag_size': 0.020,  # 米
+    'tag_ids': [1, 2, 3, 4],
+    'tag_centers': {
+        1: [-0.015, -0.015, 0.0],
+        2: [0.015, -0.015, 0.0],
+        3: [-0.015, 0.015, 0.0],
+        4: [0.015, 0.015, 0.0],
+    },
+    'decision_margin_threshold': 20.0,
+    'min_area_ratio': 0.0005,
+    # Eye-to-Hand: board center pose relative to TCP, [m, m, m, deg, deg, deg].
+    'board_to_tcp_rough': [0.00162, 0.0, 0.115, 0.0, -90.0, 0.0],
+}
+
 # AprilTag 标定结果测试配置
 APRILTAG_TEST_CONFIG = {
     'mode': 'eye_to_hand',

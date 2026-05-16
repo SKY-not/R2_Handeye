@@ -105,7 +105,7 @@ class ErrorCalculator:
         Returns:
             errors: 每帧的重投影误差 (像素)
         """
-        if self.backend == 'apriltag':
+        if self.backend in ('apriltag', 'apriltag_board'):
             print("AprilTag 后端跳过重投影误差计算")
             return np.array([], dtype=np.float64)
 
@@ -298,7 +298,7 @@ class ErrorCalculator:
         - 左/右方向键（兼容 Shift+方向键）: 切换帧
         - Esc: 退出
         """
-        if self.backend == 'apriltag':
+        if self.backend in ('apriltag', 'apriltag_board'):
             print('AprilTag 后端跳过逐帧重投影显示')
             return
 

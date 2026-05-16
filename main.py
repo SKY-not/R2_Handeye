@@ -17,7 +17,7 @@ from data_collector import CalibDataCollector
 from calibration_solver import CalibrationSolver
 from error_calculator import ErrorCalculator
 from result_visualizer import ResultVisualizer
-from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG
+from config import APRILTAG_BOARD_CONFIG, CHECKERBOARD_CONFIG, CALIBRATION_CONFIG
 
 
 def _rough_pose_deg_to_rad(pose: List[float]) -> List[float]:
@@ -53,30 +53,25 @@ def select_backend() -> str:
     print("请选择特征后端:")
     print("  1. Checkerboard (棋盘格)")
     print("  2. AprilTag")
+    print("  3. Four-AprilTag Board")
     print("=" * 50)
 
     while True:
-        choice = input("\n请输入选项 (1/2): ").strip()
+        choice = input("\n请输入选项 (1/2/3): ").strip()
         if choice == '1':
             return 'checkerboard'
         elif choice == '2':
             return 'apriltag'
+        elif choice == '3':
+            return 'apriltag_board'
         else:
             print("无效选择，请重新输入")
 
 
-def load_rough_pose(mode: str) -> List[float]:
-    """
-    加载粗略位姿
-
-    Args:
-        mode: 标定模式
-
-    Returns:
-        board_to_base 或 board_to_tcp (取决于模式)
-    """
+def load_rough_pose(mode: str, backend: str) -> List[float]:
+    """Load rough target pose for visualization/error reference."""
     if mode == 'eye_on_hand':
-        # Eye-on-Hand: 标定板相对于基座的位姿
+        # Eye-on-Hand: target pose relative to robot base.
         pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_base_rough', [0, 0, 0, 0, 0, 0])
         pose_deg = [float(v) for v in cast(Sequence[float], pose_deg_any)]
         pose = _rough_pose_deg_to_rad(pose_deg)
@@ -84,8 +79,11 @@ def load_rough_pose(mode: str) -> List[float]:
         print(f"转换后用于计算(弧度): {pose}")
         return pose
     else:
-        # Eye-to-Hand: 标定板相对于TCP的位姿
-        pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
+        # Eye-to-Hand: target pose relative to TCP.
+        if backend == 'apriltag_board':
+            pose_deg_any = APRILTAG_BOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
+        else:
+            pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
         pose_deg = [float(v) for v in cast(Sequence[float], pose_deg_any)]
         pose = _rough_pose_deg_to_rad(pose_deg)
         print(f"\n加载 Eye-to-Hand 粗略位姿(角度输入): {pose_deg}")
@@ -108,7 +106,7 @@ def main() -> None:
     print(f"已选择后端: {backend}")
 
     # 加载粗略位姿 (仅用于可视化/误差计算参考)
-    rough_pose = load_rough_pose(mode)
+    rough_pose = load_rough_pose(mode, backend)
 
     # 2. 连接设备
     device_mgr = DeviceManager()
@@ -219,7 +217,7 @@ def main() -> None:
     rotation_errors_deg = np.degrees(rotation_errors)
 
     reproj_errors = np.array([], dtype=np.float64)
-    if backend != 'apriltag':
+    if backend == 'checkerboard':
         reproj_errors = error_calc.calculate_reprojection_error(
             robot_poses,
             camera_poses,
@@ -229,12 +227,12 @@ def main() -> None:
 
     error_calc.print_error_report(position_errors, "位置误差报告", unit='m')
     error_calc.print_error_report(rotation_errors_deg, "旋转误差报告 (deg)", unit='deg')
-    if backend != 'apriltag':
+    if backend == 'checkerboard':
         error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)", unit='px')
     else:
         print("\nAprilTag 后端已跳过重投影误差计算")
 
-    if backend != 'apriltag':
+    if backend == 'checkerboard':
         show_reproj_frames = input("是否逐帧查看重投影角点对比? (y/n): ").strip().lower()
         if show_reproj_frames == 'y':
             if mode == 'eye_on_hand':
