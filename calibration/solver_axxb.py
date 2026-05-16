@@ -206,6 +206,8 @@ class HandEyeSolver:
         M = np.vstack(rows)
         _, _, Vt = np.linalg.svd(M)
         R_raw = Vt[-1].reshape(3, 3, order='F')
+        if np.linalg.det(R_raw) < 0:
+            R_raw = -R_raw
 
         # Project the linear solution back onto SO(3).
         U, _, Vt = np.linalg.svd(R_raw)
