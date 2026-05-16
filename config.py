@@ -82,7 +82,7 @@ APRILTAG_BOARD_CONFIG = {
     'decision_margin_threshold': 20.0,
     'min_area_ratio': 0.0005,
     # Eye-to-Hand: board center pose relative to TCP, [m, m, m, deg, deg, deg].
-    'board_to_tcp_rough': [0.00162, 0.0, 0.115, 0.0, -90.0, 0.0],
+    'board_to_tcp_rough': [0.00162, 0.0, 0.070, 0.0, -90.0, 0.0],
 }
 
 # AprilTag 标定结果测试配置
