@@ -6,7 +6,7 @@
 
 import numpy as np
 import os
-from typing import Dict, List, Optional
+from typing import Dict
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -51,17 +51,8 @@ CHECKERBOARD_CONFIG = {
 # 标定模式配置
 CALIBRATION_MODES = ['eye_on_hand', 'eye_to_hand']
 
-# SVD 采集与特征分析配置
-SVD_CONFIG = {
-    'data_root': os.path.join(PROJECT_ROOT, 'data', 'svd'),
-    'images_dirname': 'images',
-    'features_filename': 'svd_features.csv',
-}
-
 # 标定参数配置
 CALIBRATION_CONFIG = {
-    'z_scale_init': 1.0,  # 深度缩放因子初始值
-    'z_scale_bounds': (0.95, 1.05),  # 深度缩放因子搜索范围
     'optimization_method': 'Nelder-Mead',
     'min_calibration_points': 6,  # 最少标定点数
 }
@@ -116,14 +107,3 @@ def get_results_path(mode: str) -> str:
     """获取指定模式的结果路径"""
     return os.path.join(PROJECT_ROOT, 'results', mode)
 
-
-def get_svd_data_path() -> Dict[str, str]:
-    """获取 SVD 采集与分析数据路径。"""
-    data_root = str(SVD_CONFIG['data_root'])
-    images_dir = os.path.join(data_root, str(SVD_CONFIG['images_dirname']))
-    features_path = os.path.join(data_root, str(SVD_CONFIG['features_filename']))
-    return {
-        'root': data_root,
-        'images': images_dir,
-        'features': features_path,
-    }

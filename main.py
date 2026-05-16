@@ -194,7 +194,7 @@ def main() -> None:
     # 根据模式设置参数
     if mode == 'eye_on_hand':
         position_errors = error_calc.calculate_position_error(
-            robot_poses, camera_poses, result['X'], result['z_scale'],
+            robot_poses, camera_poses, result['X'],
             board_to_base=rough_pose
         )
         rotation_errors = error_calc.calculate_rotation_error(
@@ -205,7 +205,7 @@ def main() -> None:
         )
     else:
         position_errors = error_calc.calculate_position_error(
-            robot_poses, camera_poses, result['X'], result['z_scale'],
+            robot_poses, camera_poses, result['X'],
             board_to_tcp=rough_pose
         )
         rotation_errors = error_calc.calculate_rotation_error(
@@ -224,8 +224,7 @@ def main() -> None:
             robot_poses,
             camera_poses,
             corners_2d_list,
-            result['X'],
-            result['z_scale']
+            result['X']
         )
 
     error_calc.print_error_report(position_errors, "位置误差报告", unit='m')
@@ -268,13 +267,13 @@ def main() -> None:
     if show_viz == 'y':
         if mode == 'eye_on_hand':
             visualizer.visualize(
-                robot_poses, result['X'], result['z_scale'],
+                robot_poses, result['X'],
                 camera_poses=camera_poses,
                 board_to_base=rough_pose
             )
         else:
             visualizer.visualize(
-                robot_poses, result['X'], result['z_scale'],
+                robot_poses, result['X'],
                 camera_poses=camera_poses,
                 board_to_tcp=rough_pose
             )

@@ -83,7 +83,6 @@ class ErrorCalculator:
         camera_poses: List[np.ndarray],
         corners_2d_list: List[np.ndarray],
         X: np.ndarray,
-        z_scale: float = 1.0,
         board_to_base: Optional[List[float]] = None,
         board_to_tcp: Optional[List[float]] = None
     ) -> np.ndarray:
@@ -100,7 +99,6 @@ class ErrorCalculator:
             camera_poses: 相机观测位姿列表 (T_cam_board)
             corners_2d_list: 每帧检测角点 (N, 2)
             X: 手眼变换矩阵
-            z_scale: 深度缩放因子
             board_to_base: 标定板相对于基座的位姿 (Eye-on-Hand用)
             board_to_tcp: 标定板相对于TCP的位姿 (Eye-to-Hand用)
 
@@ -180,7 +178,6 @@ class ErrorCalculator:
         robot_poses: List[np.ndarray],
         camera_poses: List[np.ndarray],
         X: np.ndarray,
-        z_scale: float = 1.0,
         board_to_base: Optional[List[float]] = None,
         board_to_tcp: Optional[List[float]] = None
     ) -> np.ndarray:
@@ -195,7 +192,6 @@ class ErrorCalculator:
             robot_poses: 机器人位姿列表
             camera_poses: 相机观测位姿列表 (T_cam_board)
             X: 手眼变换矩阵
-            z_scale: 深度缩放因子
             board_to_base: 标定板相对于基座的位姿 (Eye-on-Hand用)
             board_to_tcp: 标定板相对于TCP的位姿 (Eye-to-Hand用)
 

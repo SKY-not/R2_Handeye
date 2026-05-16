@@ -43,7 +43,6 @@ class ResultVisualizer:
         self,
         robot_poses: List[np.ndarray],
         X: np.ndarray,
-        z_scale: float = 1.0,
         frame_scale: float = 1.0,
         camera_poses: Optional[List[np.ndarray]] = None,
         board_to_base: Optional[List[float]] = None,
@@ -55,7 +54,6 @@ class ResultVisualizer:
         Args:
             robot_poses: TCP pose list (in base coordinate system)
             X: hand-eye transformation matrix (camera relative to TCP or base)
-            z_scale: depth scale factor
             frame_scale: coordinate frame axis length scale factor
             camera_poses: board pose list in camera frame (T_cam_board)
             board_to_base: rough pose of calibration board relative to base (for Eye-on-Hand)

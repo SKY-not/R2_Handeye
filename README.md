@@ -1,35 +1,28 @@
 # 手眼标定系统
 
-基于 UR3 机械臂和 Intel RealSense D405 相机的手眼标定工具。
-
-## 设备
-
-- **机械臂**: UR3 (TCP/IP, 端口 30003)
-- **相机**: Intel RealSense D405
+基于 UR3 机械臂和 Intel RealSense D405 相机的手眼标定工具。当前主流程支持棋盘格和 AprilTag 两种观测后端，支持 Eye-on-Hand 和 Eye-to-Hand 两种安装方式。
 
 ## 项目结构
 
-```
-handeye/
-├── main.py                 # 主入口程序
-├── config.py               # 配置文件
-├── device_manager.py       # 设备连接管理
-├── data_collector.py       # 数据采集模块
-├── calibration_solver.py   # AX=XB 标定求解
-├── error_calculator.py     # 误差计算
-├── result_visualizer.py    # 结果可视化
-├── calibration/            # 底层算法
-|   ├── svd.py             # SVD算法
-│   ├── solver_axxb.py     # SVD求解器
-│   ├── optimizer.py       # 非线性优化
-|   ├── transforms.py    # 坐标变换工具
+```text
+R2_Handeye/
+├── main.py                 # 主入口
+├── config.py               # 参数配置
+├── device_manager.py       # 机器人和相机连接管理
+├── data_collector.py       # 标定数据采集
+├── calibration_solver.py   # 数据加载、AX=XB 初值、优化和保存
+├── error_calculator.py     # 位姿参考误差和棋盘格重投影误差
+├── result_visualizer.py    # 标定结果可视化
+├── calibration/
+│   ├── solver_axxb.py      # AX=XB SVD 求解
+│   ├── optimizer.py        # 非线性优化
+│   ├── transforms.py       # 坐标变换工具
 │   └── feature_extractor.py # 棋盘格角点检测
-├── robot/                  # 机械臂驱动
-│   └── ur_robot.py        # UR3通信
-├── camera/                 # 相机驱动
-│   └── realsense.py       # D405驱动
-├── data/                   # 标定数据存储
-└── results/                # 标定结果存储
+├── camera/realsense.py     # RealSense D405 驱动
+├── robot/ur_robot.py       # UR3 通信
+├── data/                   # 标定数据
+├── results/                # 标定结果
+└── tests/                  # 验证程序
 ```
 
 ## 安装
@@ -38,109 +31,99 @@ handeye/
 pip install -r requirements.txt
 ```
 
-## 配置 (config.py)
+## 标定模式
+
+| 模式 | 相机安装方式 | 标定结果 `X` 的含义 | 常用变换 |
+| --- | --- | --- | --- |
+| `eye_on_hand` | 相机安装在机械臂末端 | `T_tcp_camera` | `T_base_target = T_base_tcp @ X @ T_camera_target` |
+| `eye_to_hand` | 相机固定在工作空间 | `T_base_camera` | `T_base_target = X @ T_camera_target` |
+
+这里的 `T_camera_target` 是相机观测到的标定目标位姿。棋盘格后端中，目标是棋盘格；AprilTag 后端中，目标是指定 tag。
+
+## 当前主流程
+
+1. 运行 `python main.py`。
+2. 选择标定模式：`eye_on_hand` 或 `eye_to_hand`。
+3. 选择观测后端：棋盘格或 AprilTag。
+4. 选择新采集数据，或使用 `data/{mode}` 下已有数据。
+5. 每帧数据保存机械臂 TCP 位姿和相机观测到的目标位姿。
+6. 使用所有帧两两组合构造 AX=XB 相对运动方程，通过 SVD 求解初值。
+7. 以 SVD 结果为初值，对 6 自由度手眼矩阵做非线性优化。
+8. 保存结果并计算误差。
+
+优化阶段只优化手眼矩阵 `X`，不再优化深度缩放。`z_scale` 固定为 `1.0`，结果目录中的 `depth_scale.txt` 只是为了兼容已有结果读取逻辑。
+
+## 观测后端
+
+### 棋盘格
+
+棋盘格角点由 `calibration/feature_extractor.py` 检测，位姿由 `solvePnP` 根据棋盘格几何尺寸和相机内参估计。
+
+相关配置在 `CHECKERBOARD_CONFIG`：
 
 ```python
-# 机械臂IP
-UR3_CONFIG = {'tcp_host_ip': '192.168.56.102', 'tcp_port': 30003}
-
-# 棋盘格参数
 CHECKERBOARD_CONFIG = {
-    'size': (11, 8),        # 内角点数量
-    'square_size': 0.006,   # 方格大小(米)
-    'board_to_base_rough': [x, y, z, rx, ry, rz],  # Eye-on-Hand粗略位姿
-    'board_to_tcp_rough': [x, y, z, rx, ry, rz],   # Eye-to-Hand粗略位姿
+    'size': (11, 8),
+    'square_size': 0.006,
+    'board_to_base_rough': [...],
+    'board_to_tcp_rough': [...],
 }
+```
 
-# AprilTag参数
+`board_to_base_rough` 和 `board_to_tcp_rough` 只用于误差评估和可视化，不参与手眼矩阵求解。
+
+### AprilTag
+
+AprilTag 后端根据 tag 检测结果和 tag 尺寸估计 `T_camera_tag`。
+
+相关配置在 `APRILTAG_CONFIG`：
+
+```python
 APRILTAG_CONFIG = {
     'family': 'tag36h11',
-    'tag_size': 0.03,  # 米
+    'tag_size': 0.03,
     'target_tag_id': 1,
     'decision_margin_threshold': 20.0,
     'min_area_ratio': 0.0005,
 }
 ```
 
-## 使用方法
+AprilTag 后端当前跳过棋盘格重投影误差，只计算位姿参考误差和旋转参考误差。
 
-### 运行程序
+## 误差含义
 
-```bash
-python main.py
-```
+- **位置参考误差**：把每帧观测到的目标位姿通过手眼矩阵和机器人位姿转换到参考坐标系后，与粗略配置位姿比较。这个误差依赖 `board_to_base_rough` 或 `board_to_tcp_rough` 的准确性，因此主要用于参考。
+- **旋转参考误差**：与位置参考误差类似，但比较旋转角度差，单位为 degree。
+- **重投影误差**：仅棋盘格后端使用。根据求解出的位姿把棋盘格角点重新投影到图像上，并与检测到的角点比较，单位为 pixel。
 
-### 操作流程
+如果参考位姿本身不准，位置参考误差可能偏大；这不一定代表手眼矩阵完全错误。更可靠的判断方式是结合重投影误差、每帧残差分布，以及实际机器人验证程序。
 
-1. **选择模式**: 输入 `1` (Eye-on-Hand) 或 `2` (Eye-to-Hand)
-2. **选择标定板**：输入 `1` (棋盘格) 或 `2` (AprilTag)
-3. **自动连接**: 连接 UR3 和 D405
-4. **数据采集**:
-   - 人工移动机械臂到新位置（示教器人工示教）
-   - 按 `Space` 检测角点并显示结果
-   - 按 `Enter` 保存当前有效检测帧和TCP位姿
-   - 按 `Esc` 退出采集
-   - 至少采集 6 帧（建议更多）
-5. **自动计算**: 基于 AX=XB 的 SVD 求解
-6. **误差报告**: 显示位置参考误差 + 全角点重投影误差
-7. **可视化**: 3D显示坐标系，误差分布图
+## 输出文件
 
-## 标定模式
+结果保存在 `results/{mode}/`：
 
-| 模式        | 说明       | 求解目标       |
-| ----------- | ---------- | -------------- |
-| Eye-on-Hand | 相机在末端 | 相机→TCP 变换  |
-| Eye-to-Hand | 相机固定   | 相机→基座 变换 |
-
-## 粗略位姿用途
-
-- 仅用于**可视化参考**显示标定板位置
-- 仅用于**误差计算**作为参考对比
-- **不参与**标定求解
-
-## 数据输出
-
-```
+```text
 results/{mode}/
-├── handeye_transform.txt  # 手眼变换矩阵 (4x4)
-├── depth_scale.txt       # 深度缩放因子
-└── calibration_info.txt  # 详细信息
+├── handeye_transform.txt  # 4x4 手眼矩阵 X
+├── depth_scale.txt        # 固定为 1.0，仅兼容保留
+└── calibration_info.txt   # 模式、z_scale 和矩阵文本
 ```
 
-## 误差指标
+实际使用时优先读取 `handeye_transform.txt`。
 
-- **位置参考误差**: 与粗略先验位姿对比（仅参考）
-- **旋转参考误差**: 与粗略先验位姿对比（仅参考）
-- **重投影误差**: 基于棋盘格全部角点的像素残差统计
+## 数据建议
 
-## SVD特征实验 (data/svd)
+- 至少采集 6 帧，建议采集更多帧。
+- 机械臂姿态变化要充分，尤其要有明显的旋转变化。
+- 避免所有采样点集中在很小范围内。
+- 棋盘格或 tag 应尽量覆盖不同图像区域和不同距离。
+- 如果某几帧检测质量明显差，建议删除后重新求解。
 
-新增了基于 RealSense 的 RGB-D 保存与离线 SVD 特征提取流程，所有实验数据统一保存到 `data/svd`。
+## 验证程序
 
-### 1) 采集RGB-D帧
+`tests/` 下的脚本用于实际验证标定结果，不属于主标定流程。其中 `tests/move_tcp_eye_to_hand_apriltag.py` 会读取结果矩阵并结合 AprilTag 观测做运动验证。
 
-```bash
-python tests/capture_svd_data.py
-```
+## 可选研究方向
 
-按键说明:
-
-- `Space`: 保存当前一帧到 `data/svd/images`
-- `Q` 或 `Esc`: 退出
-
-输出文件:
-
-- `data/svd/images/rgb_XXX.png`
-- `data/svd/images/depth_XXX.npy`
-- `data/svd/images/timestamps.csv`
-- `data/svd/images/camera_intrinsics.json`
-
-### 2) 离线SVD特征提取
-
-```bash
-python -m calibration.svd
-```
-
-输出文件:
-
-- `data/svd/svd_features.csv`
+- **RGB-D 重投影优化**：将棋盘格角点像素结合 RealSense 深度图恢复为相机坐标系下的 3D 点，再通过手眼矩阵和机器人位姿建立重投影残差进行非线性优化。当前主流程未采用。
+- **RGB-D 棋盘格位姿估计**：直接用角点像素和深度图恢复棋盘格 3D 角点，再拟合棋盘格平面与坐标系，作为 `solvePnP` 之外的观测方式。当前主流程未采用。

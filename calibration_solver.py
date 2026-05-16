@@ -94,27 +94,6 @@ class CalibrationSolver:
         """Invert 4x4 homogeneous transform."""
         return invert_transform(T)
 
-    @staticmethod
-    def _average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
-        """Average multiple 4x4 transforms (SVD for rotation, mean for translation)."""
-        if len(transforms) == 0:
-            raise ValueError("无法对空变换列表求平均")
-
-        rotations = np.array([T[:3, :3] for T in transforms])
-        translations = np.array([T[:3, 3] for T in transforms])
-
-        R_mean = np.mean(rotations, axis=0)
-        U, _, Vt = np.linalg.svd(R_mean)
-        R = U @ Vt
-        if np.linalg.det(R) < 0:
-            U[:, -1] *= -1
-            R = U @ Vt
-
-        T_avg = np.eye(4)
-        T_avg[:3, :3] = R
-        T_avg[:3, 3] = np.mean(translations, axis=0)
-        return T_avg
-
     def _save_pnp_debug_data(
         self,
         frame_index: str,
@@ -248,7 +227,7 @@ class CalibrationSolver:
         Returns:
             result: {
                 'X': 手眼变换矩阵,
-                'z_scale': 深度缩放因子,
+                'z_scale': compatibility value fixed at 1.0,
                 'optimization_result': 优化结果
             }
         """
@@ -258,13 +237,7 @@ class CalibrationSolver:
 
         # 1. SVD 求解
         print("\n[1/2] SVD 求解...")
-        if self.mode == 'eye_on_hand':
-            # Eye-on-Hand:
-            camera_poses_for_solver = [self._invert_transform(T) for T in camera_poses]
-            X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses)
-        else:
-            # Eye-to-Hand:
-            X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses)
+        X_svd = self.solver.solve_axxb_svd(robot_poses, camera_poses)
         print("SVD 求解完成")
 
         # 打印SVD结果
@@ -278,8 +251,7 @@ class CalibrationSolver:
                 robot_poses=robot_poses,
                 camera_data=camera_poses,
                 intrinsics=self.intrinsics,
-                initial_X=X_svd,
-                z_scale_init=1.0
+                initial_X=X_svd
             )
             print("非线性优化完成")
             print(f"  优化是否成功: {opt_result.success}")
@@ -291,7 +263,7 @@ class CalibrationSolver:
             opt_result = None
             print("回退使用SVD结果作为最终解")
 
-        print(f"  深度缩放因子: {z_scale:.6f}")
+        print(f"  z_scale (fixed): {z_scale:.6f}")
 
         # 打印优化后结果
         pos = X_opt[:3, 3]
@@ -317,7 +289,7 @@ class CalibrationSolver:
         # 保存手眼变换矩阵
         np.savetxt(os.path.join(results_path, 'handeye_transform.txt'), X, delimiter=' ')
 
-        # 保存深度缩放因子
+        # Keep this compatibility file for existing result consumers.
         np.savetxt(os.path.join(results_path, 'depth_scale.txt'), np.array([z_scale]), delimiter=' ')
 
         # 保存详细信息

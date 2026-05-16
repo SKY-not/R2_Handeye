@@ -112,7 +112,6 @@ class CalibDataCollector:
 
         # Real-time preview control
         self._preview_active = False
-        self._preview_thread = None
         self._latest_frame = None
         self._frame_lock = threading.Lock()
 
@@ -430,39 +429,6 @@ class CalibDataCollector:
         cv2.imshow('Corner Detection Result', rgb)
         cv2.waitKey(100)
 
-    def _preview_loop(self) -> None:
-        """Background thread: real-time camera image display"""
-        # Create resizable window
-        cv2.namedWindow('Camera Preview', cv2.WINDOW_NORMAL)
-
-        while self._preview_active:
-            try:
-                rgb, depth = self.camera.get_data()
-
-                # Check image validity (fix black screen issue)
-                if rgb is None or rgb.size == 0 or rgb.mean() < 1.0:
-                    time.sleep(0.05)
-                    continue
-
-                # Save latest frame for main thread
-                with self._frame_lock:
-                    self._latest_frame = rgb.copy()
-
-                # Display real-time preview
-                preview = rgb.copy()
-                target_hint = "Space: detect target  Enter: save  Esc: exit"
-                cv2.putText(preview, target_hint, (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(preview, f"Collected: {self.frame_count} / Min: {self.min_frames_required}", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
-                cv2.imshow('Camera Preview', preview)
-                cv2.waitKey(1)
-            except Exception as e:
-                print(f"Preview error: {e}")
-                time.sleep(0.1)
-
-        cv2.destroyWindow('Camera Preview')
-
     def _update_preview_once(self) -> int:
         """Render one preview frame in main thread and return keyboard key code."""
         try:
@@ -497,9 +463,6 @@ class CalibDataCollector:
     def stop_preview(self) -> None:
         """Stop real-time preview thread"""
         self._preview_active = False
-        if self._preview_thread:
-            self._preview_thread.join(timeout=1.0)
-            self._preview_thread = None
         cv2.destroyAllWindows()
         print("Real-time preview stopped")
 
