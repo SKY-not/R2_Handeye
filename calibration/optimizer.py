@@ -70,16 +70,14 @@ class HandEyeOptimizer:
                 initial_X[:3, :3] = R
                 initial_X[:3, 3] = t
 
-        # 参数向量: [x, y, z, rx, ry, rz, z_scale]
-        x0 = np.zeros(7)
+        # 参数向量: [x, y, z, rx, ry, rz]
+        x0 = np.zeros(6)
         x0[:3] = initial_X[:3, 3]
         x0[3:6] = self.solver.log_rot(initial_X[:3, :3])
-        x0[6] = z_scale_init
 
         # 定义目标函数
         def objective(params: np.ndarray) -> float:
             X = self.solver.pose_to_mat(params[:6])
-            z_scale = params[6]
 
             errors: List[np.ndarray] = []
 
@@ -88,7 +86,6 @@ class HandEyeOptimizer:
                     if camera_data[i].shape == (4, 4):
                         # 位姿形式
                         T_cam = camera_data[i].copy()
-                        T_cam[2, 3] *= z_scale  # 应用深度缩放
 
                         # Eye-on-Hand: robot_pose @ X @ T_cam
                         # Eye-to-Hand: robot_pose @ T_cam @ X
@@ -110,7 +107,6 @@ class HandEyeOptimizer:
                     else:
                         # 3D点形式
                         p_cam = camera_data[i].copy()
-                        p_cam[2] *= z_scale
 
                         # 转换到世界坐标
                         p_world = X @ np.append(p_cam, 1)
@@ -136,7 +132,7 @@ class HandEyeOptimizer:
 
         # 提取结果
         X_opt = self.solver.pose_to_mat(result.x[:6])
-        z_scale_opt = result.x[6]
+        z_scale_opt = 1.0
 
         return X_opt, z_scale_opt, result
 
