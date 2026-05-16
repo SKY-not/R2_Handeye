@@ -156,46 +156,23 @@ class HandEyeSolver:
         A_list = []  # 机器人相对运动
         B_list = []  # 相机相对运动
 
-        for i in range(n - 1):
-            if self.mode == 'eye_to_hand':
-                A = np.asarray(robot_poses[i + 1] @ self.invert_transform(robot_poses[i]), dtype=np.float64)
-                B = np.asarray(camera_poses[i + 1] @ self.invert_transform(camera_poses[i]), dtype=np.float64)
-            else:
-                A = np.asarray(self.invert_transform(robot_poses[i]) @ robot_poses[i+1], dtype=np.float64)
-                B = np.asarray(camera_poses[i] @ self.invert_transform(camera_poses[i+1]), dtype=np.float64)
-            A_list.append(A)
-            B_list.append(B)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if self.mode == 'eye_to_hand':
+                    A = np.asarray(robot_poses[j] @ self.invert_transform(robot_poses[i]), dtype=np.float64)
+                    B = np.asarray(camera_poses[j] @ self.invert_transform(camera_poses[i]), dtype=np.float64)
+                else:
+                    A = np.asarray(self.invert_transform(robot_poses[i]) @ robot_poses[j], dtype=np.float64)
+                    B = np.asarray(camera_poses[i] @ self.invert_transform(camera_poses[j]), dtype=np.float64)
+                A_list.append(A)
+                B_list.append(B)
 
         # 使用 Tsai-Lenz 方法的变体
-        rotations = []
-        translations = []
+        if not A_list:
+            raise ValueError("No valid relative motions for AX=XB solving")
 
-        for A, B in zip(A_list, B_list):
-            R_A = A[:3, :3]
-            t_A = A[:3, 3]
-            R_B = B[:3, :3]
-            t_B = B[:3, 3]
-
-            # 旋转求解
-            R_X = self.solve_rotation(R_A, R_B)
-
-            # 平移求解
-            t_X = self.solve_translation(R_A, t_A, R_B, t_B, R_X)
-
-            rotations.append(R_X)
-            translations.append(t_X)
-
-        # 融合所有估计 (取中值)
-        # TODO: 可以改进为加权平均或使用 RANSAC 去除异常值，或者使用旋转向量取平均
-        R_X = np.median(rotations, axis=0)
-        # 确保是合法旋转矩阵
-        U, _, Vt = np.linalg.svd(R_X)
-        R_X = U @ Vt
-        if np.linalg.det(R_X) < 0:
-            U[:, -1] *= -1
-            R_X = U @ Vt
-
-        t_X = np.median(translations, axis=0)
+        R_X = self.solve_rotation(A_list, B_list)
+        t_X = self.solve_translation(A_list, B_list, R_X)
 
         # 构建齐次变换矩阵
         X = np.eye(4)
@@ -204,55 +181,75 @@ class HandEyeSolver:
 
         return np.asarray(X, dtype=np.float64)
 
-    def solve_rotation(self, R_A: np.ndarray, R_B: np.ndarray) -> np.ndarray:
+    def solve_rotation(self, A_list: List[np.ndarray], B_list: List[np.ndarray]) -> np.ndarray:
         """
         求解旋转部分
 
         Args:
-            R_A: 机器人相对旋转
-            R_B: 相机相对旋转
+            A_list: 机器人相对运动列表
+            B_list: 相机相对运动列表
 
         Returns:
             R_X: 手眼旋转矩阵
         """
-        # TODO: 这里的求解方法有问题，或许是最初误差很大的原因
-        # 使用SVD求解
-        M = R_A @ R_B.T
-        U, _, Vt = np.linalg.svd(M)
-        R_X = U @ Vt
+        if len(A_list) != len(B_list):
+            raise ValueError("A_list and B_list must have the same length")
 
-        # 处理反射情况
+        I = np.eye(3, dtype=np.float64)
+        rows = []
+
+        for A, B in zip(A_list, B_list):
+            R_A = np.asarray(A[:3, :3], dtype=np.float64)
+            R_B = np.asarray(B[:3, :3], dtype=np.float64)
+            rows.append(np.kron(I, R_A) - np.kron(R_B.T, I))
+
+        M = np.vstack(rows)
+        _, _, Vt = np.linalg.svd(M)
+        R_raw = Vt[-1].reshape(3, 3, order='F')
+
+        # Project the linear solution back onto SO(3).
+        U, _, Vt = np.linalg.svd(R_raw)
+        R_X = U @ Vt
         if np.linalg.det(R_X) < 0:
-            Vt[-1, :] *= -1
+            U[:, -1] *= -1
             R_X = U @ Vt
 
         return np.asarray(R_X, dtype=np.float64)
 
     def solve_translation(
         self,
-        R_A: np.ndarray,
-        t_A: np.ndarray,
-        R_B: np.ndarray,
-        t_B: np.ndarray,
+        A_list: List[np.ndarray],
+        B_list: List[np.ndarray],
         R_X: np.ndarray
     ) -> np.ndarray:
         """
         求解平移部分
 
         Args:
-            R_A, t_A: 机器人相对运动
-            R_B, t_B: 相机相对运动
+            A_list: 机器人相对运动列表
+            B_list: 相机相对运动列表
             R_X: 已求解的旋转矩阵
 
         Returns:
             t_X: 手眼平移向量
         """
-        # (I - R_A) * t_X = R_X * t_B - t_A
-        M = np.eye(3) - R_A
-        rhs = R_X @ t_B - t_A
+        if len(A_list) != len(B_list):
+            raise ValueError("A_list and B_list must have the same length")
 
-        # 最小二乘求解
-        # 由于M可能是奇异的，我们使用伪逆
+        lhs_rows = []
+        rhs_rows = []
+        I = np.eye(3, dtype=np.float64)
+
+        for A, B in zip(A_list, B_list):
+            R_A = np.asarray(A[:3, :3], dtype=np.float64)
+            t_A = np.asarray(A[:3, 3], dtype=np.float64)
+            t_B = np.asarray(B[:3, 3], dtype=np.float64)
+
+            lhs_rows.append(R_A - I)
+            rhs_rows.append(R_X @ t_B - t_A)
+
+        M = np.vstack(lhs_rows)
+        rhs = np.concatenate(rhs_rows)
         t_X = np.linalg.lstsq(M, rhs, rcond=None)[0]
 
         return np.asarray(t_X, dtype=np.float64)
