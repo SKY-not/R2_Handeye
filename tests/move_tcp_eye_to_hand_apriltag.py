@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -129,8 +130,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-tag-id",
         type=int,
-        default=_cfg_int("target_tag_id", 0),
-        help="目标AprilTag ID"
+        default=None,
+        help="覆盖 APRILTAG_TEST_CONFIG['target_tag_id']；默认使用 config.py 中的测试目标 tag"
     )
     parser.add_argument(
         "--dry-run",
@@ -140,14 +141,16 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _select_mode_interactive() -> str:
+def _select_mode_interactive(default_mode: str) -> str:
+    default_mode = default_mode if default_mode in ("eye_to_hand", "eye_on_hand") else "eye_to_hand"
+    default_choice = "1" if default_mode == "eye_to_hand" else "2"
     print("\n请选择手眼模式:")
     print("  1) eye_to_hand (眼在手外)")
     print("  2) eye_on_hand (眼在手上)")
     while True:
-        choice = input("请输入 1 或 2 (默认1): ").strip()
+        choice = input(f"请输入 1 或 2 (默认{default_choice}, 来自 APRILTAG_TEST_CONFIG['mode']): ").strip()
         if choice == "":
-            return "eye_to_hand"
+            return default_mode
         if choice == "1":
             return "eye_to_hand"
         if choice == "2":
@@ -163,9 +166,10 @@ def _build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     if target_pose.shape != (6,):
         raise ValueError("APRILTAG_TEST_CONFIG['t_tag_tcp_target'] 必须是6维 [x,y,z,rx,ry,rz]")
 
-    mode = _select_mode_interactive()
+    mode = _select_mode_interactive(_cfg_str("mode", "eye_to_hand"))
     default_handeye_file = os.path.join(ROOT, "results", mode, "handeye_transform.txt")
     handeye_file = str(args.handeye_file) if str(args.handeye_file).strip() else default_handeye_file
+    target_tag_id = _cfg_int("target_tag_id", 0) if args.target_tag_id is None else int(args.target_tag_id)
 
     cfg = RuntimeConfig(
         mode=mode,
@@ -173,7 +177,7 @@ def _build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         handeye_file=handeye_file,
         tag_family=_cfg_str("tag_family", "tag36h11"),
         tag_size=_cfg_float("tag_size", 0.04),
-        target_tag_id=int(args.target_tag_id),
+        target_tag_id=target_tag_id,
         decision_margin_threshold=_cfg_float("decision_margin_threshold", 20.0),
         axis_length=_cfg_float("axis_length", 0.03),
         t_tag_tcp_target=target_pose,
@@ -427,6 +431,9 @@ def main() -> None:
     locked_target_pose: Optional[np.ndarray] = None
     actual_tcp_pose: Optional[np.ndarray] = None
     t_base_tag_lock: Optional[np.ndarray] = None
+    last_pose_update_time: Optional[float] = None
+    tag_pose_rate_hz = 0.0
+    last_rate_print_time = time.monotonic()
 
     # 到达判定阈值: 平移 2mm, 旋转向量范数 0.02rad
     pos_arrival_threshold_m = 0.002
@@ -476,16 +483,25 @@ def main() -> None:
                     else:
                         live_target_pose = None
 
-                _draw_frame_overlay(
-                    undistorted,
-                    t_camera_tcp_target,
-                    optimal_intr,
-                    cfg.axis_length,
-                    label="TCP target",
-                    origin_color=(255, 255, 255),
-                    thickness=3,
-                )
-                status_text = "TARGET DETECTED"
+                if live_target_pose is not None:
+                    now = time.monotonic()
+                    if last_pose_update_time is not None:
+                        dt = now - last_pose_update_time
+                        if dt > 1e-6:
+                            instant_hz = 1.0 / dt
+                            tag_pose_rate_hz = instant_hz if tag_pose_rate_hz <= 0.0 else 0.8 * tag_pose_rate_hz + 0.2 * instant_hz
+                    last_pose_update_time = now
+
+                    _draw_frame_overlay(
+                        undistorted,
+                        t_camera_tcp_target,
+                        optimal_intr,
+                        cfg.axis_length,
+                        label="TCP target",
+                        origin_color=(255, 255, 255),
+                        thickness=3,
+                    )
+                    status_text = "TARGET DETECTED"
             else:
                 live_target_pose = None
 
@@ -509,13 +525,28 @@ def main() -> None:
                 2,
                 cv2.LINE_AA,
             )
+            cv2.putText(
+                undistorted,
+                f"test tag: id={cfg.target_tag_id} size={cfg.tag_size:.3f}m  pose rate={tag_pose_rate_hz:.1f}Hz",
+                (20, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+            now_for_print = time.monotonic()
+            if now_for_print - last_rate_print_time >= 1.0:
+                print(f"Tag pose refresh: {tag_pose_rate_hz:.1f} Hz (test tag id={cfg.target_tag_id})")
+                last_rate_print_time = now_for_print
 
             if live_target_pose is not None:
                 pose_msg = "live pose: " + np.array2string(live_target_pose, precision=4, suppress_small=True)
                 cv2.putText(
                     undistorted,
                     pose_msg,
-                    (20, 90),
+                    (20, 115),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (255, 255, 0),
@@ -528,7 +559,7 @@ def main() -> None:
                 cv2.putText(
                     undistorted,
                     lock_msg,
-                    (20, 115),
+                    (20, 140),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (0, 255, 255),
@@ -559,7 +590,7 @@ def main() -> None:
                 cv2.putText(
                     undistorted,
                     f"actual tcp: {line1}",
-                    (20, 145),
+                    (20, 170),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
                     (255, 255, 255),
@@ -569,7 +600,7 @@ def main() -> None:
                 cv2.putText(
                     undistorted,
                     f"           {line2}",
-                    (20, 168),
+                    (20, 193),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
                     (255, 255, 255),
@@ -585,7 +616,7 @@ def main() -> None:
                     cv2.putText(
                         undistorted,
                         f"to lock: dpos={pos_err*1000:.2f}mm drot={rot_err:.3f}rad [{arrive_text}]",
-                        (20, 191),
+                        (20, 216),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
                         arrive_color,
