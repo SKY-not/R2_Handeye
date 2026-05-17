@@ -2,6 +2,7 @@
 data/
 data/eye*/
 data_single/
+data_AddCalibrationConsistency/
 # Python generated files
 __pycache__/
 *.py[cod]

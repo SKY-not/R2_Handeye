@@ -269,11 +269,18 @@ class CalibrationSolver:
                 robot_poses=robot_poses,
                 camera_data=camera_poses,
                 intrinsics=self.intrinsics,
-                initial_X=X_svd
+                initial_X=X_svd,
+                position_weight=float(CALIBRATION_CONFIG.get('spatial_position_weight', 0.5)),
+                rotation_weight=float(CALIBRATION_CONFIG.get('spatial_rotation_weight', 0.5))
             )
             print("非线性优化完成")
             print(f"  优化是否成功: {opt_result.success}")
             print(f"  最终目标函数值 (误差): {opt_result.fun:.6e}")
+            print(
+                "  spatial weights: "
+                f"position={float(CALIBRATION_CONFIG.get('spatial_position_weight', 0.5)):.3f}, "
+                f"rotation={float(CALIBRATION_CONFIG.get('spatial_rotation_weight', 0.5)):.3f}"
+            )
         except Exception as e:
             print(f"优化过程出现异常: {e}")
             X_opt = X_svd

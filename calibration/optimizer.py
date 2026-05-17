@@ -8,6 +8,7 @@
 import numpy as np
 from scipy import optimize
 from scipy.optimize import OptimizeResult
+from scipy.spatial.transform import Rotation
 from typing import List, Optional, Tuple
 
 from calibration.solver_axxb import HandEyeSolver
@@ -31,7 +32,9 @@ class HandEyeOptimizer:
         robot_poses: List[np.ndarray],
         camera_data: List[np.ndarray],
         intrinsics: Optional[np.ndarray],
-        initial_X: Optional[np.ndarray] = None
+        initial_X: Optional[np.ndarray] = None,
+        position_weight: float = 0.5,
+        rotation_weight: float = 0.5
     ) -> Tuple[np.ndarray, float, OptimizeResult]:
         """
         优化求解手眼变换
@@ -54,6 +57,11 @@ class HandEyeOptimizer:
             if not isinstance(cam_pose, np.ndarray) or cam_pose.shape != (4, 4):
                 raise ValueError(f"camera_data[{idx}] must be a 4x4 pose matrix")
 
+        if position_weight < 0 or rotation_weight < 0:
+            raise ValueError("position_weight and rotation_weight must be non-negative")
+        if position_weight == 0 and rotation_weight == 0:
+            raise ValueError("at least one of position_weight or rotation_weight must be positive")
+
         # 初始估计
         if initial_X is None:
             initial_X = self.solver.solve_axxb_svd(robot_poses, camera_data)
@@ -64,10 +72,19 @@ class HandEyeOptimizer:
         x0[3:6] = self.solver.log_rot(initial_X[:3, :3])
 
         # 定义目标函数
+        def average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
+            translations = np.asarray([T[:3, 3] for T in transforms], dtype=np.float64)
+            rotations = Rotation.from_matrix(np.asarray([T[:3, :3] for T in transforms], dtype=np.float64))
+
+            T_avg = np.eye(4, dtype=np.float64)
+            T_avg[:3, :3] = rotations.mean().as_matrix()
+            T_avg[:3, 3] = np.mean(translations, axis=0)
+            return T_avg
+
         def objective(params: np.ndarray) -> float:
             X = self.solver.pose_to_mat(params[:6])
 
-            errors: List[np.ndarray] = []
+            target_poses: List[np.ndarray] = []
 
             for i in range(n):
                 T_cam = camera_data[i].copy()
@@ -79,19 +96,23 @@ class HandEyeOptimizer:
                 else:
                     T_world = self.solver.invert_transform(robot_poses[i]) @ X @ T_cam
 
-                if i == 0:
-                    T_world_ref = T_world
-                    T_world_ref_inv = self.solver.invert_transform(T_world_ref)
-                    errors.append(np.zeros(6, dtype=np.float64))
-                else:
-                    E = T_world @ T_world_ref_inv
-                    error_pose = self.solver.mat_to_pose(E)
-                    errors.append(error_pose)
+                target_poses.append(T_world)
 
-            if not errors:
+            if not target_poses:
                 return 0.0
-            errors_arr = np.concatenate(errors)
-            return float(np.sum(errors_arr ** 2))
+
+            T_ref = average_transforms(target_poses)
+            T_ref_inv = self.solver.invert_transform(T_ref)
+            position_cost = 0.0
+            rotation_cost = 0.0
+
+            for T_world in target_poses:
+                E = T_ref_inv @ T_world
+                error_pose = self.solver.mat_to_pose(E)
+                position_cost += float(np.dot(error_pose[:3], error_pose[:3]))
+                rotation_cost += float(np.dot(error_pose[3:6], error_pose[3:6]))
+
+            return float(position_weight * position_cost + rotation_weight * rotation_cost)
 
         # 优化
         result = optimize.minimize(

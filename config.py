@@ -55,6 +55,8 @@ CALIBRATION_MODES = ['eye_on_hand', 'eye_to_hand']
 CALIBRATION_CONFIG = {
     'optimization_method': 'Nelder-Mead',
     'min_calibration_points': 6,  # 最少标定点数
+    'spatial_position_weight': 0.5,
+    'spatial_rotation_weight': 0.5,
 }
 
 # AprilTag 标定配置
@@ -82,7 +84,7 @@ APRILTAG_BOARD_CONFIG = {
     'decision_margin_threshold': 20.0,
     'min_area_ratio': 0.0005,
     # Eye-to-Hand: board center pose relative to TCP, [m, m, m, deg, deg, deg].
-    'board_to_tcp_rough': [0.00162, 0.0, 0.070, 0.0, -90.0, 0.0],
+    'board_to_tcp_rough': [-0.0006, 0.0, 0.070, 0.0, -90.0, 0.0],
 }
 
 # AprilTag 标定结果测试配置
