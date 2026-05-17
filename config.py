@@ -53,7 +53,7 @@ CALIBRATION_MODES = ['eye_on_hand', 'eye_to_hand']
 
 # 标定参数配置
 CALIBRATION_CONFIG = {
-    'optimization_method': 'Nelder-Mead',
+    'optimization_method': 'SE3-Least-Squares',
     'min_calibration_points': 6,  # 最少标定点数
     'spatial_position_weight': 0.5,
     'spatial_rotation_weight': 0.5,

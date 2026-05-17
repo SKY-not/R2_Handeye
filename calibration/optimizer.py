@@ -66,10 +66,29 @@ class HandEyeOptimizer:
         if initial_X is None:
             initial_X = self.solver.solve_axxb_svd(robot_poses, camera_data)
 
-        # 参数向量: [x, y, z, rx, ry, rz]
-        x0 = np.zeros(6)
-        x0[:3] = initial_X[:3, 3]
-        x0[3:6] = self.solver.log_rot(initial_X[:3, :3])
+        # SE(3) left perturbation: X = exp(delta) @ initial_X.
+        delta0 = np.zeros(6, dtype=np.float64)
+
+        def se3_exp(xi: np.ndarray) -> np.ndarray:
+            rho = np.asarray(xi[:3], dtype=np.float64)
+            phi = np.asarray(xi[3:6], dtype=np.float64)
+            theta = float(np.linalg.norm(phi))
+            K = self.solver.vec_to_skew(phi)
+
+            R = Rotation.from_rotvec(phi).as_matrix()
+            if theta < 1e-8:
+                V = np.eye(3, dtype=np.float64) + 0.5 * K + (1.0 / 6.0) * (K @ K)
+            else:
+                V = (
+                    np.eye(3, dtype=np.float64)
+                    + ((1.0 - np.cos(theta)) / (theta ** 2)) * K
+                    + ((theta - np.sin(theta)) / (theta ** 3)) * (K @ K)
+                )
+
+            T = np.eye(4, dtype=np.float64)
+            T[:3, :3] = R
+            T[:3, 3] = V @ rho
+            return T
 
         # 定义目标函数
         def average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
@@ -81,8 +100,8 @@ class HandEyeOptimizer:
             T_avg[:3, 3] = np.mean(translations, axis=0)
             return T_avg
 
-        def objective(params: np.ndarray) -> float:
-            X = self.solver.pose_to_mat(params[:6])
+        def residuals(delta: np.ndarray) -> np.ndarray:
+            X = se3_exp(delta) @ initial_X
 
             target_poses: List[np.ndarray] = []
 
@@ -99,31 +118,35 @@ class HandEyeOptimizer:
                 target_poses.append(T_world)
 
             if not target_poses:
-                return 0.0
+                return np.zeros(0, dtype=np.float64)
 
             T_ref = average_transforms(target_poses)
             T_ref_inv = self.solver.invert_transform(T_ref)
-            position_cost = 0.0
-            rotation_cost = 0.0
+            residual_list: List[np.ndarray] = []
+            position_scale = float(np.sqrt(position_weight))
+            rotation_scale = float(np.sqrt(rotation_weight))
 
             for T_world in target_poses:
                 E = T_ref_inv @ T_world
                 error_pose = self.solver.mat_to_pose(E)
-                position_cost += float(np.dot(error_pose[:3], error_pose[:3]))
-                rotation_cost += float(np.dot(error_pose[3:6], error_pose[3:6]))
+                residual_list.append(position_scale * error_pose[:3])
+                residual_list.append(rotation_scale * error_pose[3:6])
 
-            return float(position_weight * position_cost + rotation_weight * rotation_cost)
+            return np.concatenate(residual_list)
 
         # 优化
-        result = optimize.minimize(
-            objective,
-            x0,
-            method='Nelder-Mead',
-            options={'maxiter': 2000, 'xatol': 1e-8, 'fatol': 1e-8}
+        result = optimize.least_squares(
+            residuals,
+            delta0,
+            method='trf',
+            max_nfev=2000,
+            xtol=1e-10,
+            ftol=1e-10,
+            gtol=1e-10
         )
 
         # 提取结果
-        X_opt = self.solver.pose_to_mat(result.x[:6])
+        X_opt = se3_exp(result.x[:6]) @ initial_X
         z_scale_opt = 1.0
 
         return X_opt, z_scale_opt, result

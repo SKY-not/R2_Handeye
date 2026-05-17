@@ -274,8 +274,14 @@ class CalibrationSolver:
                 rotation_weight=float(CALIBRATION_CONFIG.get('spatial_rotation_weight', 0.5))
             )
             print("非线性优化完成")
+            print(f"  优化方法: {CALIBRATION_CONFIG.get('optimization_method', 'SE3-Least-Squares')}")
             print(f"  优化是否成功: {opt_result.success}")
-            print(f"  最终目标函数值 (误差): {opt_result.fun:.6e}")
+            objective_value = (
+                float(2.0 * opt_result.cost)
+                if hasattr(opt_result, 'cost')
+                else float(opt_result.fun)
+            )
+            print(f"  最终目标函数值 (误差): {objective_value:.6e}")
             print(
                 "  spatial weights: "
                 f"position={float(CALIBRATION_CONFIG.get('spatial_position_weight', 0.5)):.3f}, "
