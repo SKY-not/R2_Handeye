@@ -334,6 +334,109 @@ class ResultVisualizer:
         plt.tight_layout()
         plt.show()
 
+    def visualize_pose_error_components(
+        self,
+        position_components: np.ndarray,
+        rotation_components: np.ndarray,
+        pos_unit: str = 'mm',
+        rot_unit: str = 'deg',
+        pos_scale: float = 1000.0,
+        rot_scale: float = 180.0 / np.pi
+    ) -> None:
+        """
+        Visualize signed pose error components in the reference target frame.
+
+        Args:
+            position_components: (N, 3), position error in meters.
+            rotation_components: (N, 3), rotation-vector error in radians.
+            pos_unit: displayed position unit.
+            rot_unit: displayed rotation unit.
+            pos_scale: scale from meters to display unit.
+            rot_scale: scale from radians to display unit.
+        """
+        if position_components.size == 0 or rotation_components.size == 0:
+            print("No pose error components to visualize.")
+            return
+
+        pos_display = np.asarray(position_components, dtype=np.float64) * pos_scale
+        rot_display = np.asarray(rotation_components, dtype=np.float64) * rot_scale
+
+        axis_labels = ['x', 'y', 'z']
+        rot_labels = ['Rx', 'Ry', 'Rz']
+
+        pos_mean = np.mean(pos_display, axis=0)
+        pos_mean_abs = np.mean(np.abs(pos_display), axis=0)
+        pos_max_abs = np.max(np.abs(pos_display), axis=0)
+        pos_std = np.std(pos_display, axis=0)
+
+        rot_mean = np.mean(rot_display, axis=0)
+        rot_mean_abs = np.mean(np.abs(rot_display), axis=0)
+        rot_max_abs = np.max(np.abs(rot_display), axis=0)
+        rot_std = np.std(rot_display, axis=0)
+
+        max_pos_idx = int(np.argmax(pos_mean_abs))
+        max_rot_idx = int(np.argmax(rot_mean_abs))
+
+        print("\nPose error components in reference target frame:")
+        print("Position components:")
+        for idx, label in enumerate(axis_labels):
+            print(
+                f"  d{label}: mean={pos_mean[idx]: .3f} {pos_unit}, "
+                f"mean_abs={pos_mean_abs[idx]:.3f} {pos_unit}, "
+                f"max_abs={pos_max_abs[idx]:.3f} {pos_unit}, "
+                f"std={pos_std[idx]:.3f} {pos_unit}"
+            )
+        print(f"  Largest position direction: d{axis_labels[max_pos_idx]} ({pos_mean_abs[max_pos_idx]:.3f} {pos_unit} mean_abs)")
+
+        print("Rotation components:")
+        for idx, label in enumerate(rot_labels):
+            print(
+                f"  d{label}: mean={rot_mean[idx]: .3f} {rot_unit}, "
+                f"mean_abs={rot_mean_abs[idx]:.3f} {rot_unit}, "
+                f"max_abs={rot_max_abs[idx]:.3f} {rot_unit}, "
+                f"std={rot_std[idx]:.3f} {rot_unit}"
+            )
+        print(f"  Largest rotation direction: d{rot_labels[max_rot_idx]} ({rot_mean_abs[max_rot_idx]:.3f} {rot_unit} mean_abs)")
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 8))
+
+        x = np.arange(3)
+
+        ax = axes[0, 0]
+        ax.bar(x, pos_mean_abs, color='steelblue', edgecolor='black')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'd{label}' for label in axis_labels])
+        ax.set_ylabel(f'Mean Abs Error ({pos_unit})')
+        ax.set_title('Position Components: Mean Absolute Error')
+        ax.grid(True, axis='y', alpha=0.3)
+
+        ax = axes[0, 1]
+        ax.boxplot([pos_display[:, idx] for idx in range(3)], labels=[f'd{label}' for label in axis_labels])
+        ax.axhline(y=0.0, color='black', linewidth=1)
+        ax.set_ylabel(f'Error ({pos_unit})')
+        ax.set_title('Position Components per Frame')
+        ax.grid(True, axis='y', alpha=0.3)
+
+        ax = axes[1, 0]
+        ax.bar(x, rot_mean_abs, color='darkorange', edgecolor='black')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'd{label}' for label in rot_labels])
+        ax.set_ylabel(f'Mean Abs Error ({rot_unit})')
+        ax.set_title('Rotation Components: Mean Absolute Error')
+        ax.grid(True, axis='y', alpha=0.3)
+
+        ax = axes[1, 1]
+        ax.boxplot([rot_display[:, idx] for idx in range(3)], labels=[f'd{label}' for label in rot_labels])
+        ax.axhline(y=0.0, color='black', linewidth=1)
+        ax.set_ylabel(f'Error ({rot_unit})')
+        ax.set_title('Rotation Components per Frame')
+        ax.grid(True, axis='y', alpha=0.3)
+
+        plt.suptitle('Pose Error Components in Reference Target Frame', fontsize=14)
+        self._attach_esc_close(fig)
+        plt.tight_layout()
+        plt.show()
+
     def _draw_coordinate_frame(
         self,
         ax: Any,

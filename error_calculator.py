@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, cast
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import CHECKERBOARD_CONFIG, REALSENSE_CONFIG
-from calibration.transforms import invert_transform, pose_to_mat
+from calibration.transforms import invert_transform, matrix_to_rotvec, pose_to_mat
 
 
 class ErrorCalculator:
@@ -276,6 +276,50 @@ class ErrorCalculator:
                     errors_rad.append(float(angle_rad))
 
         return np.array(errors_rad, dtype=np.float64)
+
+    def calculate_pose_error_components(
+        self,
+        robot_poses: List[np.ndarray],
+        camera_poses: List[np.ndarray],
+        X: np.ndarray,
+        board_to_base: Optional[List[float]] = None,
+        board_to_tcp: Optional[List[float]] = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Calculate signed pose error components in the reference target frame.
+
+        Returns:
+            position_components: shape (N, 3), unit meter, expressed in reference target frame.
+            rotation_components: shape (N, 3), unit rad, rotation vector of reference-to-measured error.
+        """
+        position_components: List[np.ndarray] = []
+        rotation_components: List[np.ndarray] = []
+
+        if self.mode == 'eye_on_hand':
+            measured_list = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
+            if board_to_base is not None:
+                ref_list = [pose_to_mat(board_to_base) for _ in measured_list]
+            else:
+                T_ref = np.mean(np.stack(measured_list), axis=0)
+                ref_list = [T_ref for _ in measured_list]
+        else:
+            measured_list = [X @ cam_pose for cam_pose in camera_poses]
+            if board_to_tcp is not None:
+                T_tcp_board = pose_to_mat(board_to_tcp)
+                ref_list = [tcp @ T_tcp_board for tcp in robot_poses[:len(measured_list)]]
+            else:
+                T_ref = np.mean(np.stack(measured_list), axis=0)
+                ref_list = [T_ref for _ in measured_list]
+
+        for T_measured, T_ref in zip(measured_list, ref_list):
+            T_error = invert_transform(T_ref) @ T_measured
+            position_components.append(np.asarray(T_error[:3, 3], dtype=np.float64))
+            rotation_components.append(matrix_to_rotvec(T_error[:3, :3]))
+
+        return (
+            np.asarray(position_components, dtype=np.float64),
+            np.asarray(rotation_components, dtype=np.float64),
+        )
 
     def visualize_reprojection_frames(
         self,

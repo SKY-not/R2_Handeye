@@ -201,12 +201,24 @@ def main() -> None:
             result['X'],
             board_to_base=rough_pose
         )
+        position_components, rotation_components = error_calc.calculate_pose_error_components(
+            robot_poses,
+            camera_poses,
+            result['X'],
+            board_to_base=rough_pose
+        )
     else:
         position_errors = error_calc.calculate_position_error(
             robot_poses, camera_poses, result['X'],
             board_to_tcp=rough_pose
         )
         rotation_errors = error_calc.calculate_rotation_error(
+            robot_poses,
+            camera_poses,
+            result['X'],
+            board_to_tcp=rough_pose
+        )
+        position_components, rotation_components = error_calc.calculate_pose_error_components(
             robot_poses,
             camera_poses,
             result['X'],
@@ -285,6 +297,14 @@ def main() -> None:
             rot_unit='deg',
             pos_scale=1000.0,
             rot_scale=1.0
+        )
+        visualizer.visualize_pose_error_components(
+            position_components,
+            rotation_components,
+            pos_unit='mm',
+            rot_unit='deg',
+            pos_scale=1000.0,
+            rot_scale=180.0 / np.pi
         )
 
     # 7. 清理

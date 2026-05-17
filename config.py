@@ -45,7 +45,7 @@ CHECKERBOARD_CONFIG = {
     'board_to_base_rough': [-0.0553, -0.3491, 0.0437, -70.5, -163.36, 7.45],
     # Eye-to-Hand: 标定板相对于TCP(法兰盘中心)的粗略位姿
     # 'board_to_tcp_rough': [-0.095, 0, 0.006, 0, 180, 0],
-    'board_to_tcp_rough': [0.005, 0, 0.075, 0, -90, 0],
+    'board_to_tcp_rough': [-0.0006, 0, 0.070, 0, -90, 0],
 }
 
 # 标定模式配置
