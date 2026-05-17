@@ -60,6 +60,8 @@ class SavedFrameData(TypedDict):
     tcp: np.ndarray
     corners: Optional[np.ndarray]
     tag_pose: Optional[np.ndarray]
+    tag_corners: Optional[np.ndarray]
+    tag_ids: Optional[np.ndarray]
     rgb: Optional[np.ndarray]
     depth: Optional[np.ndarray]
     index: str
@@ -710,6 +712,18 @@ class CalibDataCollector:
             else:
                 tag_pose = None
 
+            tag_corners_path = os.path.join(poses_dir, f'tag_corners_{idx}.txt')
+            if os.path.exists(tag_corners_path):
+                tag_corners = np.loadtxt(tag_corners_path).reshape(-1, 2)
+            else:
+                tag_corners = None
+
+            tag_ids_path = os.path.join(poses_dir, f'tag_ids_{idx}.txt')
+            if os.path.exists(tag_ids_path):
+                tag_ids = np.loadtxt(tag_ids_path, dtype=np.int32).reshape(-1)
+            else:
+                tag_ids = None
+
             # Load images
             rgb_path = os.path.join(images_dir, f'rgb_{idx}.png')
             rgb = cv2.imread(rgb_path) if os.path.exists(rgb_path) else None
@@ -721,6 +735,8 @@ class CalibDataCollector:
                 'tcp': tcp,
                 'corners': corners,
                 'tag_pose': tag_pose,
+                'tag_corners': tag_corners,
+                'tag_ids': tag_ids,
                 'rgb': rgb,
                 'depth': depth,
                 'index': idx

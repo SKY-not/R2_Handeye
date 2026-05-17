@@ -9,10 +9,11 @@ import cv2
 import sys
 import os
 from typing import Dict, List, Optional, cast
+from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import CHECKERBOARD_CONFIG, REALSENSE_CONFIG
+from config import APRILTAG_BOARD_CONFIG, APRILTAG_CONFIG, CHECKERBOARD_CONFIG, REALSENSE_CONFIG
 from calibration.transforms import invert_transform, matrix_to_rotvec, pose_to_mat
 
 
@@ -76,6 +77,119 @@ class ErrorCalculator:
         cos_theta = (np.trace(R_rel) - 1.0) / 2.0
         cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
         return float(np.arccos(cos_theta))
+
+    @staticmethod
+    def _average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
+        """Average rigid transforms by averaging translations and rotations separately."""
+        if not transforms:
+            return np.eye(4, dtype=np.float64)
+        translations = np.asarray([T[:3, 3] for T in transforms], dtype=np.float64)
+        rotations = Rotation.from_matrix([T[:3, :3] for T in transforms])
+        T_avg = np.eye(4, dtype=np.float64)
+        T_avg[:3, 3] = np.mean(translations, axis=0)
+        T_avg[:3, :3] = rotations.mean().as_matrix()
+        return T_avg
+
+    @staticmethod
+    def _project_points(T_camera_target: np.ndarray, object_points: np.ndarray, intrinsics: np.ndarray, dist_coeffs: np.ndarray) -> np.ndarray:
+        rvec, _ = cv2.Rodrigues(T_camera_target[:3, :3])
+        tvec = T_camera_target[:3, 3].reshape(3, 1)
+        image_points, _ = cv2.projectPoints(object_points, rvec, tvec, intrinsics, dist_coeffs)
+        return image_points.reshape(-1, 2)
+
+    def _apriltag_projection_params(self, image: Optional[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Return the camera model used by the AprilTag detector.
+
+        AprilTag detection is performed on undistorted images with alpha=0 optimal intrinsics,
+        so reprojection must use the same camera matrix and zero distortion.
+        """
+        if image is None or image.size == 0:
+            return self.intrinsics, np.zeros((5, 1), dtype=np.float64)
+
+        h, w = image.shape[:2]
+        new_k, _ = cv2.getOptimalNewCameraMatrix(
+            self.intrinsics,
+            self.dist_coeffs,
+            (w, h),
+            alpha=0,
+            newImgSize=(w, h)
+        )
+        return np.asarray(new_k, dtype=np.float64), np.zeros((5, 1), dtype=np.float64)
+
+    @staticmethod
+    def _best_square_corner_error(projected: np.ndarray, detected: np.ndarray) -> float:
+        """Compare one projected square to detected corners, allowing cyclic/reversed ordering."""
+        projected_4 = np.asarray(projected, dtype=np.float64).reshape(4, 2)
+        detected_4 = np.asarray(detected, dtype=np.float64).reshape(4, 2)
+        candidates = []
+        for shift in range(4):
+            candidates.append(np.roll(detected_4, shift, axis=0))
+            candidates.append(np.roll(detected_4[::-1], shift, axis=0))
+        return float(min(np.mean(np.linalg.norm(projected_4 - cand, axis=1)) for cand in candidates))
+
+    def _single_tag_object_points(self) -> np.ndarray:
+        s = float(cast(float, APRILTAG_CONFIG['tag_size']))
+        h = 0.5 * s
+        return np.array([
+            [-h, -h, 0.0],
+            [h, -h, 0.0],
+            [h, h, 0.0],
+            [-h, h, 0.0],
+        ], dtype=np.float64)
+
+    def _board_tag_object_points(self, tag_id: int) -> np.ndarray:
+        s = float(cast(float, APRILTAG_BOARD_CONFIG['tag_size']))
+        h = 0.5 * s
+        centers = cast(Dict[int, List[float]], APRILTAG_BOARD_CONFIG['tag_centers'])
+        center = np.asarray(centers[int(tag_id)], dtype=np.float64).reshape(3)
+        local = np.array([
+            [-h, -h, 0.0],
+            [h, -h, 0.0],
+            [h, h, 0.0],
+            [-h, h, 0.0],
+        ], dtype=np.float64)
+        return local + center.reshape(1, 3)
+
+    def _apriltag_frame_reprojection_error(
+        self,
+        T_camera_target: np.ndarray,
+        tag_corners: np.ndarray,
+        tag_ids: np.ndarray,
+        intrinsics: np.ndarray,
+        dist_coeffs: np.ndarray
+    ) -> Optional[float]:
+        corners = np.asarray(tag_corners, dtype=np.float64).reshape(-1, 2)
+        if corners.shape[0] < 4:
+            return None
+
+        if self.backend == 'apriltag':
+            object_points = self._single_tag_object_points()
+            detected = corners[:4]
+            projected = self._project_points(T_camera_target, object_points, intrinsics, dist_coeffs)
+            return self._best_square_corner_error(projected, detected)
+
+        if self.backend != 'apriltag_board':
+            return None
+
+        ids = np.asarray(tag_ids, dtype=np.int32).reshape(-1)
+        if ids.size == 0:
+            return None
+
+        per_tag_errors: List[float] = []
+        for idx, tag_id in enumerate(ids):
+            start = idx * 4
+            end = start + 4
+            if end > corners.shape[0]:
+                break
+            object_points = self._board_tag_object_points(int(tag_id))
+            detected = corners[start:end]
+            projected = self._project_points(T_camera_target, object_points, intrinsics, dist_coeffs)
+            per_tag_errors.append(self._best_square_corner_error(projected, detected))
+
+        if not per_tag_errors:
+            return None
+        return float(np.mean(per_tag_errors))
 
     def calculate_reprojection_error(
         self,
@@ -321,6 +435,103 @@ class ErrorCalculator:
             np.asarray(rotation_components, dtype=np.float64),
         )
 
+    def calculate_spatial_consistency(
+        self,
+        robot_poses: List[np.ndarray],
+        camera_poses: List[np.ndarray],
+        X: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Calculate target-pose consistency without using a manually measured reference pose.
+
+        Eye-on-Hand: target should be fixed in base.
+        Eye-to-Hand: target should be fixed in TCP.
+        """
+        if self.mode == 'eye_on_hand':
+            target_poses = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
+        else:
+            target_poses = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
+
+        T_ref = self._average_transforms(target_poses)
+        pos_components: List[np.ndarray] = []
+        rot_components: List[np.ndarray] = []
+        pos_errors: List[float] = []
+        rot_errors: List[float] = []
+
+        for T_target in target_poses:
+            T_error = invert_transform(T_ref) @ T_target
+            pos_component = np.asarray(T_error[:3, 3], dtype=np.float64)
+            rot_component = matrix_to_rotvec(T_error[:3, :3])
+            pos_components.append(pos_component)
+            rot_components.append(rot_component)
+            pos_errors.append(float(np.linalg.norm(pos_component)))
+            rot_errors.append(float(np.linalg.norm(rot_component)))
+
+        return (
+            np.asarray(pos_errors, dtype=np.float64),
+            np.asarray(rot_errors, dtype=np.float64),
+            np.asarray(pos_components, dtype=np.float64),
+            np.asarray(rot_components, dtype=np.float64),
+        )
+
+    def calculate_apriltag_observed_reprojection_error(
+        self,
+        camera_poses: List[np.ndarray],
+        tag_corners_list: List[np.ndarray],
+        tag_ids_list: List[np.ndarray],
+        images: Optional[List[np.ndarray]] = None
+    ) -> np.ndarray:
+        """Evaluate AprilTag projection using each frame's observed tag/board pose."""
+        if self.backend not in ('apriltag', 'apriltag_board'):
+            return np.array([], dtype=np.float64)
+
+        frame_errors: List[float] = []
+        if images is None:
+            images = [None] * len(camera_poses)  # type: ignore[list-item]
+        for camera_pose, tag_corners, tag_ids, image in zip(camera_poses, tag_corners_list, tag_ids_list, images):
+            proj_intr, proj_dist = self._apriltag_projection_params(image)
+            err = self._apriltag_frame_reprojection_error(camera_pose, tag_corners, tag_ids, proj_intr, proj_dist)
+            if err is not None:
+                frame_errors.append(err)
+        return np.asarray(frame_errors, dtype=np.float64)
+
+    def calculate_apriltag_chain_reprojection_error(
+        self,
+        robot_poses: List[np.ndarray],
+        camera_poses: List[np.ndarray],
+        tag_corners_list: List[np.ndarray],
+        tag_ids_list: List[np.ndarray],
+        X: np.ndarray,
+        images: Optional[List[np.ndarray]] = None
+    ) -> np.ndarray:
+        """
+        Evaluate AprilTag reprojection through the full hand-eye chain.
+
+        The target reference is the spatial-consistency mean pose, so this does not depend on
+        the manually supplied rough target pose.
+        """
+        if self.backend not in ('apriltag', 'apriltag_board'):
+            return np.array([], dtype=np.float64)
+
+        if self.mode == 'eye_on_hand':
+            target_poses = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
+            T_ref = self._average_transforms(target_poses)
+            predicted_camera_poses = [invert_transform(X) @ invert_transform(tcp) @ T_ref for tcp in robot_poses]
+        else:
+            target_poses = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
+            T_ref = self._average_transforms(target_poses)
+            predicted_camera_poses = [invert_transform(X) @ tcp @ T_ref for tcp in robot_poses]
+
+        frame_errors: List[float] = []
+        if images is None:
+            images = [None] * len(predicted_camera_poses)  # type: ignore[list-item]
+        for camera_pose, tag_corners, tag_ids, image in zip(predicted_camera_poses, tag_corners_list, tag_ids_list, images):
+            proj_intr, proj_dist = self._apriltag_projection_params(image)
+            err = self._apriltag_frame_reprojection_error(camera_pose, tag_corners, tag_ids, proj_intr, proj_dist)
+            if err is not None:
+                frame_errors.append(err)
+        return np.asarray(frame_errors, dtype=np.float64)
+
     def visualize_reprojection_frames(
         self,
         images: List[np.ndarray],
@@ -486,7 +697,7 @@ class ErrorCalculator:
             dict: 统计信息
         """
         if len(errors) == 0:
-            return {'mean': 0, 'max': 0, 'min': 0, 'std': 0}
+            return {'mean': 0, 'max': 0, 'min': 0, 'std': 0, 'median': 0}
 
         return {
             'mean': np.mean(errors),

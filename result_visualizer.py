@@ -341,7 +341,8 @@ class ResultVisualizer:
         pos_unit: str = 'mm',
         rot_unit: str = 'deg',
         pos_scale: float = 1000.0,
-        rot_scale: float = 180.0 / np.pi
+        rot_scale: float = 180.0 / np.pi,
+        title: str = 'Pose Error Components in Reference Target Frame'
     ) -> None:
         """
         Visualize signed pose error components in the reference target frame.
@@ -377,7 +378,7 @@ class ResultVisualizer:
         max_pos_idx = int(np.argmax(pos_mean_abs))
         max_rot_idx = int(np.argmax(rot_mean_abs))
 
-        print("\nPose error components in reference target frame:")
+        print(f"\n{title}:")
         print("Position components:")
         for idx, label in enumerate(axis_labels):
             print(
@@ -432,7 +433,7 @@ class ResultVisualizer:
         ax.set_title('Rotation Components per Frame')
         ax.grid(True, axis='y', alpha=0.3)
 
-        plt.suptitle('Pose Error Components in Reference Target Frame', fontsize=14)
+        plt.suptitle(title, fontsize=14)
         self._attach_esc_close(fig)
         plt.tight_layout()
         plt.show()

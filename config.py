@@ -95,7 +95,7 @@ APRILTAG_TEST_CONFIG = {
     'axis_length': 0.030,  # 图像可视化坐标轴长度 (米)
     # 目标: tag坐标系下TCP位姿 [x, y, z, rx, ry, rz]
     # 平移单位米, 旋转为Rodrigues旋转向量(弧度)
-    't_tag_tcp_target': [0.0, 0.30, 0.0, 0.0, np.pi, 0.0],  # 目标位姿 (TCP在tag坐标系下) eye_to_hand
+    't_tag_tcp_target': [0.0, -0.50, 0.0, 0.0, np.pi, 0.0],  # 目标位姿 (TCP在tag坐标系下) eye_to_hand
     # 't_tag_tcp_target': [0.0, 0.0, -0.30, 0.0, 0.0, 0.0],  # 目标位姿 (TCP在tag坐标系下) eye_on_hand
     'rtde_velocity': 0.05,
     'rtde_acceleration': 0.05,

@@ -168,7 +168,7 @@ def main() -> None:
         backend=backend
     )
     try:
-        robot_poses, camera_poses, corners_2d_list, images = solver.load_data(collector)
+        robot_poses, camera_poses, corners_2d_list, images, tag_corners_list, tag_ids_list = solver.load_data(collector)
     except ValueError as e:
         print(f"错误: {e}")
         print("请继续采集数据后重试，或退出流程。")
@@ -227,8 +227,14 @@ def main() -> None:
 
     # calculate_rotation_error returns radians; convert to degrees for display.
     rotation_errors_deg = np.degrees(rotation_errors)
+    spatial_pos_errors, spatial_rot_errors, spatial_pos_components, spatial_rot_components = (
+        error_calc.calculate_spatial_consistency(robot_poses, camera_poses, result['X'])
+    )
+    spatial_rot_errors_deg = np.degrees(spatial_rot_errors)
 
     reproj_errors = np.array([], dtype=np.float64)
+    apriltag_observed_reproj_errors = np.array([], dtype=np.float64)
+    apriltag_chain_reproj_errors = np.array([], dtype=np.float64)
     if backend == 'checkerboard':
         reproj_errors = error_calc.calculate_reprojection_error(
             robot_poses,
@@ -236,13 +242,31 @@ def main() -> None:
             corners_2d_list,
             result['X']
         )
+    else:
+        apriltag_observed_reproj_errors = error_calc.calculate_apriltag_observed_reprojection_error(
+            camera_poses,
+            tag_corners_list,
+            tag_ids_list,
+            images
+        )
+        apriltag_chain_reproj_errors = error_calc.calculate_apriltag_chain_reprojection_error(
+            robot_poses,
+            camera_poses,
+            tag_corners_list,
+            tag_ids_list,
+            result['X'],
+            images
+        )
 
     error_calc.print_error_report(position_errors, "位置误差报告", unit='m')
     error_calc.print_error_report(rotation_errors_deg, "旋转误差报告 (deg)", unit='deg')
+    error_calc.print_error_report(spatial_pos_errors, "空间一致性位置误差报告", unit='m')
+    error_calc.print_error_report(spatial_rot_errors_deg, "空间一致性旋转误差报告 (deg)", unit='deg')
     if backend == 'checkerboard':
         error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)", unit='px')
     else:
-        print("\nAprilTag 后端已跳过重投影误差计算")
+        error_calc.print_error_report(apriltag_observed_reproj_errors, "AprilTag观测位姿重投影误差报告 (px)", unit='px')
+        error_calc.print_error_report(apriltag_chain_reproj_errors, "AprilTag全链路重投影误差报告 (px)", unit='px')
 
     if backend == 'checkerboard':
         show_reproj_frames = input("是否逐帧查看重投影角点对比? (y/n): ").strip().lower()
@@ -304,7 +328,17 @@ def main() -> None:
             pos_unit='mm',
             rot_unit='deg',
             pos_scale=1000.0,
-            rot_scale=180.0 / np.pi
+            rot_scale=180.0 / np.pi,
+            title='Pose Error Components in Provided Reference Target Frame'
+        )
+        visualizer.visualize_pose_error_components(
+            spatial_pos_components,
+            spatial_rot_components,
+            pos_unit='mm',
+            rot_unit='deg',
+            pos_scale=1000.0,
+            rot_scale=180.0 / np.pi,
+            title='Spatial Consistency Components Around Mean Target Pose'
         )
 
     # 7. 清理

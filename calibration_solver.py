@@ -115,7 +115,7 @@ class CalibrationSolver:
     def load_data(
         self,
         data_collector: DataCollectorProtocol
-    ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
         """
         加载采集的数据
 
@@ -127,6 +127,8 @@ class CalibrationSolver:
             camera_poses: 相机观测位姿列表 (T_cam_board)
             corners_2d_list: 每帧角点像素坐标
             images: 与有效帧对齐的 RGB 图像列表
+            tag_corners_list: 与有效帧对齐的 AprilTag 角点列表
+            tag_ids_list: 与有效帧对齐的 AprilTag id 列表
         """
         saved_data = data_collector.get_saved_data()
 
@@ -153,6 +155,8 @@ class CalibrationSolver:
         camera_poses = []
         corners_2d_list = []
         images = []
+        tag_corners_list = []
+        tag_ids_list = []
         objp = self._build_checkerboard_object_points() if self.backend == 'checkerboard' else None
         dist_coeffs = self.dist_coeffs
 
@@ -169,6 +173,16 @@ class CalibrationSolver:
                     print(f"  警告: 帧 {d['index']} tag_pose 维度异常，跳过")
                     continue
                 corners_2d = np.zeros((0, 2), dtype=np.float32)
+                tag_corners = d.get('tag_corners')
+                if tag_corners is None:
+                    tag_corners_arr = np.zeros((0, 2), dtype=np.float32)
+                else:
+                    tag_corners_arr = np.asarray(tag_corners, dtype=np.float32).reshape(-1, 2)
+                tag_ids = d.get('tag_ids')
+                if tag_ids is None:
+                    tag_ids_arr = np.zeros((0,), dtype=np.int32)
+                else:
+                    tag_ids_arr = np.asarray(tag_ids, dtype=np.int32).reshape(-1)
             else:
                 corners = d['corners']
 
@@ -194,10 +208,14 @@ class CalibrationSolver:
 
                 camera_pose = self._rvec_tvec_to_transform(rvec, tvec)
                 self._save_pnp_debug_data(str(d['index']), objp, corners_2d, camera_pose)
+                tag_corners_arr = np.zeros((0, 2), dtype=np.float32)
+                tag_ids_arr = np.zeros((0,), dtype=np.int32)
 
             robot_poses.append(tcp)
             camera_poses.append(camera_pose)
             corners_2d_list.append(corners_2d)
+            tag_corners_list.append(tag_corners_arr)
+            tag_ids_list.append(tag_ids_arr)
             if d['rgb'] is not None:
                 images.append(d['rgb'])
             else:
@@ -208,7 +226,7 @@ class CalibrationSolver:
                 f"有效数据不足: {len(robot_poses)}, 需要至少{self.min_points_required}个"
             )
 
-        return robot_poses, camera_poses, corners_2d_list, images
+        return robot_poses, camera_poses, corners_2d_list, images, tag_corners_list, tag_ids_list
 
     def solve(
         self,
