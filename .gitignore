@@ -1,8 +1,7 @@
 # Ignore collected calibration data (keep directory structure)
 data/
 data/eye*/
-data_single/
-data_AddCalibrationConsistency/
+data*/
 # Python generated files
 __pycache__/
 *.py[cod]
