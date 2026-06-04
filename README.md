@@ -2,7 +2,20 @@
 
 基于 UR3 机械臂和 Intel RealSense D405 相机的手眼标定工具。当前主流程支持棋盘格和 AprilTag 两种观测后端，支持 Eye-on-Hand 和 Eye-to-Hand 两种安装方式。
 
+## 分支说明
+
+当前仓库主要有三个本地分支：
+
+| 分支 | 主要作用 | 相对差异 |
+| --- | --- | --- |
+| `main` | 基础主线版本，适合作为最稳定的手眼标定流程参考。 | 支持 Eye-on-Hand / Eye-to-Hand，观测后端以棋盘格和单 AprilTag 为主；使用 AX=XB SVD 初值加普通非线性优化，`z_scale` 固定为 `1.0`。 |
+| `Four_AprilTag` | 四 AprilTag 标定板版本，适合使用 4 个 tag 融合成板中心位姿来做标定。 | 在 `main` 基础上增加 `apriltag_board` 后端、四 tag 板布局配置、帧内多 tag 加权融合、AprilTag 观测/全链路重投影误差、误差分量诊断和对应可视化。 |
+| `SE3` | SE(3) 最小二乘优化实验版本。 | 基于 `Four_AprilTag` 的功能，把优化器从 `Nelder-Mead` 参数直接优化改为 SE(3) 左扰动形式的 `least_squares`，结果目录使用 `results/eye_to_hand-SE3/`。 |
+
+分支关系大致为：`main` -> `Four_AprilTag` -> `SE3`。如果只是复现基础流程，优先看 `main`；如果要使用四 AprilTag 标定板，使用 `Four_AprilTag`；如果要比较或继续实验 SE(3) 优化方式，使用 `SE3`。
+
 ## 项目结构
+
 
 ```text
 R2_Handeye/
