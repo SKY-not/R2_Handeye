@@ -7,10 +7,8 @@
 """
 
 import numpy as np
-from scipy import optimize
-from scipy.optimize import OptimizeResult
-from typing import List, Optional, Tuple
-from calibration.transforms import mat_to_pose, pose_to_mat, invert_transform
+from typing import List, Tuple
+from calibration.transforms import mat_to_pose, pose_to_mat, invert_transform, matrix_to_rotvec, rotvec_to_matrix, validate_transform
 
 
 class HandEyeSolver:
@@ -23,7 +21,10 @@ class HandEyeSolver:
         Args:
             mode: 'eye_on_hand' 或 'eye_to_hand'
         """
+        if mode not in ('eye_on_hand', 'eye_to_hand'):
+            raise ValueError(f'Unknown calibration mode: {mode}')
         self.mode = mode
+        self.diagnostics = {}
 
     # ==================== 刚体变换辅助函数 ====================
 
@@ -68,13 +69,7 @@ class HandEyeSolver:
         Returns:
             rotvec: 3维旋转向量
         """
-        theta = np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
-
-        if np.abs(theta) < 1e-6:
-            return np.zeros(3)
-
-        log_R = (theta / (2 * np.sin(theta))) * (R - R.T)
-        return HandEyeSolver.skew_to_vec(log_R)
+        return matrix_to_rotvec(R)
 
     @staticmethod
     def exp_rot(rotvec: np.ndarray) -> np.ndarray:
@@ -87,15 +82,7 @@ class HandEyeSolver:
         Returns:
             R: 3x3 旋转矩阵
         """
-        theta = np.linalg.norm(rotvec)
-
-        if theta < 1e-6:
-            return np.eye(3)
-
-        axis = rotvec / theta
-        K = HandEyeSolver.vec_to_skew(axis)
-
-        return np.asarray(np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K), dtype=np.float64)
+        return rotvec_to_matrix(rotvec)
 
     @staticmethod
     def mat_to_pose(T: np.ndarray) -> np.ndarray:
@@ -149,8 +136,12 @@ class HandEyeSolver:
             X: 手眼变换矩阵 (4x4)
         """
         n = len(robot_poses)
-        if n < 2:
-            raise ValueError("至少需要2组数据")
+        if n < 3 or n != len(camera_poses):
+            raise ValueError('At least three paired robot/camera poses are required')
+        robot_poses = [validate_transform(t, f'robot[{i}]') for i, t in enumerate(robot_poses)]
+        camera_poses = [validate_transform(t, f'camera[{i}]') for i, t in enumerate(camera_poses)]
+        robot_inv = [invert_transform(t) for t in robot_poses]
+        camera_inv = [invert_transform(t) for t in camera_poses]
 
         # 计算相对运动
         A_list = []  # 机器人相对运动
@@ -159,11 +150,11 @@ class HandEyeSolver:
         for i in range(n):
             for j in range(i + 1, n):
                 if self.mode == 'eye_to_hand':
-                    A = np.asarray(robot_poses[j] @ self.invert_transform(robot_poses[i]), dtype=np.float64)
-                    B = np.asarray(camera_poses[j] @ self.invert_transform(camera_poses[i]), dtype=np.float64)
+                    A = np.asarray(robot_poses[j] @ robot_inv[i], dtype=np.float64)
+                    B = np.asarray(camera_poses[j] @ camera_inv[i], dtype=np.float64)
                 else:
-                    A = np.asarray(self.invert_transform(robot_poses[i]) @ robot_poses[j], dtype=np.float64)
-                    B = np.asarray(camera_poses[i] @ self.invert_transform(camera_poses[j]), dtype=np.float64)
+                    A = np.asarray(robot_inv[i] @ robot_poses[j], dtype=np.float64)
+                    B = np.asarray(camera_poses[i] @ camera_inv[j], dtype=np.float64)
                 A_list.append(A)
                 B_list.append(B)
 
@@ -171,6 +162,12 @@ class HandEyeSolver:
         if not A_list:
             raise ValueError("No valid relative motions for AX=XB solving")
 
+        for name, motions in [('robot', A_list), ('camera', B_list)]:
+            axes = np.asarray([matrix_to_rotvec(t[:3, :3]) for t in motions])
+            singular = np.linalg.svd(axes, compute_uv=False)
+            self.diagnostics[f'{name}_rotation_singular_values'] = singular.tolist()
+            if singular[0] < 1e-3 or singular[1] < max(1e-3, singular[0] * 1e-3):
+                raise ValueError(f'{name}: insufficient rotation about independent axes; collect more tilted poses')
         R_X = self.solve_rotation(A_list, B_list)
         t_X = self.solve_translation(A_list, B_list, R_X)
 
@@ -204,7 +201,8 @@ class HandEyeSolver:
             rows.append(np.kron(I, R_A) - np.kron(R_B.T, I))
 
         M = np.vstack(rows)
-        _, _, Vt = np.linalg.svd(M)
+        _, spectrum, Vt = np.linalg.svd(M, full_matrices=False)
+        self.diagnostics["rotation_system_singular_values"] = spectrum.tolist()
         R_raw = Vt[-1].reshape(3, 3, order='F')
         if np.linalg.det(R_raw) < 0:
             R_raw = -R_raw
@@ -252,7 +250,10 @@ class HandEyeSolver:
 
         M = np.vstack(lhs_rows)
         rhs = np.concatenate(rhs_rows)
-        t_X = np.linalg.lstsq(M, rhs, rcond=None)[0]
+        t_X, _, rank, singular = np.linalg.lstsq(M, rhs, rcond=1e-6)
+        self.diagnostics['translation_singular_values'] = singular.tolist()
+        if rank < 3 or singular[-1] < singular[0] * 1e-3:
+            raise ValueError('Hand-eye translation is underconstrained; collect rotations about different axes')
 
         return np.asarray(t_X, dtype=np.float64)
 

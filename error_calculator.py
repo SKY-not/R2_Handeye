@@ -13,8 +13,10 @@ from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import APRILTAG_BOARD_CONFIG, APRILTAG_CONFIG, CHECKERBOARD_CONFIG, REALSENSE_CONFIG
-from calibration.transforms import invert_transform, matrix_to_rotvec, pose_to_mat
+from config import REALSENSE_CONFIG
+from calibration.transforms import invert_transform, pose_to_mat, average_transforms, target_poses
+from calibration.targets import target_config, checkerboard_points, tag_correspondences, reprojection_errors
+from camera.model import Rectifier
 
 
 class ErrorCalculator:
@@ -25,7 +27,8 @@ class ErrorCalculator:
         mode: str,
         intrinsics: Optional[np.ndarray] = None,
         dist_coeffs: Optional[np.ndarray] = None,
-        backend: str = 'checkerboard'
+        backend: str = 'checkerboard',
+        target: Optional[dict] = None,
     ) -> None:
         """
         初始化误差计算器
@@ -37,6 +40,7 @@ class ErrorCalculator:
         """
         self.mode = mode
         self.backend = backend
+        self.target_config = target_config(backend) if target is None else target
 
         # 相机内参（优先使用外部传入真实内参）
         if intrinsics is not None:
@@ -57,18 +61,10 @@ class ErrorCalculator:
             self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
         # 棋盘格参数
-        cb_size_any = CHECKERBOARD_CONFIG['size']
-        cb_size_tuple = cast(tuple[int, int], cb_size_any)
-        self.cb_size: tuple[int, int] = (int(cb_size_tuple[0]), int(cb_size_tuple[1]))
-        self.square_size: float = float(cast(float, CHECKERBOARD_CONFIG['square_size']))
+        self.rectifier = Rectifier(self.intrinsics, self.dist_coeffs)
 
     def _build_checkerboard_object_points(self) -> np.ndarray:
-        """Build checkerboard corner points in board coordinate frame."""
-        cb_cols, cb_rows = self.cb_size
-        objp = np.zeros((cb_cols * cb_rows, 3), dtype=np.float64)
-        objp[:, :2] = np.mgrid[0:cb_cols, 0:cb_rows].T.reshape(-1, 2)
-        objp *= self.square_size
-        return objp
+        return checkerboard_points(self.target_config)
 
     @staticmethod
     def _rotation_angle_error_rad(R1: np.ndarray, R2: np.ndarray) -> float:
@@ -81,14 +77,7 @@ class ErrorCalculator:
     @staticmethod
     def _average_transforms(transforms: List[np.ndarray]) -> np.ndarray:
         """Average rigid transforms by averaging translations and rotations separately."""
-        if not transforms:
-            return np.eye(4, dtype=np.float64)
-        translations = np.asarray([T[:3, 3] for T in transforms], dtype=np.float64)
-        rotations = Rotation.from_matrix([T[:3, :3] for T in transforms])
-        T_avg = np.eye(4, dtype=np.float64)
-        T_avg[:3, 3] = np.mean(translations, axis=0)
-        T_avg[:3, :3] = rotations.mean().as_matrix()
-        return T_avg
+        return average_transforms(transforms)
 
     @staticmethod
     def _project_points(T_camera_target: np.ndarray, object_points: np.ndarray, intrinsics: np.ndarray, dist_coeffs: np.ndarray) -> np.ndarray:
@@ -105,374 +94,67 @@ class ErrorCalculator:
         so reprojection must use the same camera matrix and zero distortion.
         """
         if image is None or image.size == 0:
-            return self.intrinsics, np.zeros((5, 1), dtype=np.float64)
-
+            raise ValueError('Image dimensions are required for rectified-pixel reprojection')
         h, w = image.shape[:2]
-        new_k, _ = cv2.getOptimalNewCameraMatrix(
-            self.intrinsics,
-            self.dist_coeffs,
-            (w, h),
-            alpha=0,
-            newImgSize=(w, h)
-        )
-        return np.asarray(new_k, dtype=np.float64), np.zeros((5, 1), dtype=np.float64)
-
-    @staticmethod
-    def _best_square_corner_error(projected: np.ndarray, detected: np.ndarray) -> float:
-        """Compare one projected square to detected corners, allowing cyclic/reversed ordering."""
-        projected_4 = np.asarray(projected, dtype=np.float64).reshape(4, 2)
-        detected_4 = np.asarray(detected, dtype=np.float64).reshape(4, 2)
-        candidates = []
-        for shift in range(4):
-            candidates.append(np.roll(detected_4, shift, axis=0))
-            candidates.append(np.roll(detected_4[::-1], shift, axis=0))
-        return float(min(np.mean(np.linalg.norm(projected_4 - cand, axis=1)) for cand in candidates))
-
-    def _single_tag_object_points(self) -> np.ndarray:
-        s = float(cast(float, APRILTAG_CONFIG['tag_size']))
-        h = 0.5 * s
-        return np.array([
-            [-h, -h, 0.0],
-            [h, -h, 0.0],
-            [h, h, 0.0],
-            [-h, h, 0.0],
-        ], dtype=np.float64)
-
-    def _board_tag_object_points(self, tag_id: int) -> np.ndarray:
-        s = float(cast(float, APRILTAG_BOARD_CONFIG['tag_size']))
-        h = 0.5 * s
-        centers = cast(Dict[int, List[float]], APRILTAG_BOARD_CONFIG['tag_centers'])
-        center = np.asarray(centers[int(tag_id)], dtype=np.float64).reshape(3)
-        local = np.array([
-            [-h, -h, 0.0],
-            [h, -h, 0.0],
-            [h, h, 0.0],
-            [-h, h, 0.0],
-        ], dtype=np.float64)
-        return local + center.reshape(1, 3)
+        return self.rectifier.prepare((w, h)), np.zeros(5)
 
     def _apriltag_frame_reprojection_error(
-        self,
-        T_camera_target: np.ndarray,
-        tag_corners: np.ndarray,
-        tag_ids: np.ndarray,
-        intrinsics: np.ndarray,
-        dist_coeffs: np.ndarray
-    ) -> Optional[float]:
-        corners = np.asarray(tag_corners, dtype=np.float64).reshape(-1, 2)
-        if corners.shape[0] < 4:
-            return None
+        self, T_camera_target: np.ndarray, tag_corners: np.ndarray, tag_ids: np.ndarray,
+        intrinsics: np.ndarray, dist_coeffs: np.ndarray,
+    ) -> float:
+        points, corners = tag_correspondences(self.target_config, tag_ids, tag_corners,
+                                              self.backend == 'apriltag_board')
+        return float(reprojection_errors(T_camera_target, points, corners, intrinsics, dist_coeffs).mean())
 
-        if self.backend == 'apriltag':
-            object_points = self._single_tag_object_points()
-            detected = corners[:4]
-            projected = self._project_points(T_camera_target, object_points, intrinsics, dist_coeffs)
-            return self._best_square_corner_error(projected, detected)
-
-        if self.backend != 'apriltag_board':
-            return None
-
-        ids = np.asarray(tag_ids, dtype=np.int32).reshape(-1)
-        if ids.size == 0:
-            return None
-
-        per_tag_errors: List[float] = []
-        for idx, tag_id in enumerate(ids):
-            start = idx * 4
-            end = start + 4
-            if end > corners.shape[0]:
-                break
-            object_points = self._board_tag_object_points(int(tag_id))
-            detected = corners[start:end]
-            projected = self._project_points(T_camera_target, object_points, intrinsics, dist_coeffs)
-            per_tag_errors.append(self._best_square_corner_error(projected, detected))
-
-        if not per_tag_errors:
-            return None
-        return float(np.mean(per_tag_errors))
-
-    def calculate_reprojection_error(
-        self,
-        robot_poses: List[np.ndarray],
-        camera_poses: List[np.ndarray],
-        corners_2d_list: List[np.ndarray],
-        X: np.ndarray,
-        board_to_base: Optional[List[float]] = None,
-        board_to_tcp: Optional[List[float]] = None
-    ) -> np.ndarray:
-        """
-        计算重投影误差
-
-        对于每帧数据:
-        1. 将标定板角点从相机坐标系转换到世界(基座)坐标系
-        2. 将世界坐标投影到像素坐标系
-        3. 与检测到的角点比较
-
-        Args:
-            robot_poses: 机器人位姿列表
-            camera_poses: 相机观测位姿列表 (T_cam_board)
-            corners_2d_list: 每帧检测角点 (N, 2)
-            X: 手眼变换矩阵
-            board_to_base: 标定板相对于基座的位姿 (Eye-on-Hand用)
-            board_to_tcp: 标定板相对于TCP的位姿 (Eye-to-Hand用)
-
-        Returns:
-            errors: 每帧的重投影误差 (像素)
-        """
-        if self.backend in ('apriltag', 'apriltag_board'):
-            print("AprilTag 后端跳过重投影误差计算")
-            return np.array([], dtype=np.float64)
-
+    def calculate_reprojection_error(self, robot_poses, camera_poses, corners_2d_list, X,
+                                     board_to_base=None, board_to_tcp=None) -> np.ndarray:
+        if self.backend != 'checkerboard':
+            raise ValueError('Use the AprilTag reprojection evaluator for this backend')
         if not (len(robot_poses) == len(camera_poses) == len(corners_2d_list)):
-            raise ValueError("robot_poses/camera_poses/corners_2d_list 长度不一致")
-
-        objp = self._build_checkerboard_object_points()
-
-        frame_errors: List[float] = []
-
-        if self.mode == 'eye_on_hand':
-            if board_to_base is not None:
-                T_base_board_ref = pose_to_mat(board_to_base)
-            else:
-                base_boards = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
-                T_base_board_ref = np.mean(np.stack(base_boards), axis=0)
-
-            for tcp, corners in zip(robot_poses, corners_2d_list):
-                T_cam_board_pred = invert_transform(X) @ invert_transform(tcp) @ T_base_board_ref
-                R = T_cam_board_pred[:3, :3]
-                t = T_cam_board_pred[:3, 3]
-                
-                pcam = (R @ objp.T + t.reshape(3, 1)).T
-                valid = pcam[:, 2] > 1e-8
-                if not np.any(valid):
-                    continue
-                    
-                rvec, _ = cv2.Rodrigues(R)
-                img_pts, _ = cv2.projectPoints(objp, rvec, t, self.intrinsics, self.dist_coeffs)
-                img_pts = img_pts.reshape(-1, 2)
-                
-                u_proj = img_pts[valid, 0]
-                v_proj = img_pts[valid, 1]
-                
-                det = corners[valid]
-                err = np.sqrt((det[:, 0] - u_proj) ** 2 + (det[:, 1] - v_proj) ** 2)
-                frame_errors.append(float(np.mean(err)))
-        else:
-            if board_to_tcp is not None:
-                T_tcp_board_ref = pose_to_mat(board_to_tcp)
-            else:
-                base_to_tcp_board_list = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
-                T_tcp_board_ref = np.mean(np.stack(base_to_tcp_board_list), axis=0)
-
-            for tcp, corners in zip(robot_poses, corners_2d_list):
-                T_cam_board_pred = invert_transform(X) @ tcp @ T_tcp_board_ref
-                R = T_cam_board_pred[:3, :3]
-                t = T_cam_board_pred[:3, 3]
-                
-                pcam = (R @ objp.T + t.reshape(3, 1)).T
-                valid = pcam[:, 2] > 1e-8
-                if not np.any(valid):
-                    continue
-                    
-                rvec, _ = cv2.Rodrigues(R)
-                img_pts, _ = cv2.projectPoints(objp, rvec, t, self.intrinsics, self.dist_coeffs)
-                img_pts = img_pts.reshape(-1, 2)
-                
-                u_proj = img_pts[valid, 0]
-                v_proj = img_pts[valid, 1]
-                
-                det = corners[valid]
-                err = np.sqrt((det[:, 0] - u_proj) ** 2 + (det[:, 1] - v_proj) ** 2)
-                frame_errors.append(float(np.mean(err)))
-
-        return np.array(frame_errors, dtype=np.float64)
-
-    def calculate_position_error(
-        self,
-        robot_poses: List[np.ndarray],
-        camera_poses: List[np.ndarray],
-        X: np.ndarray,
-        board_to_base: Optional[List[float]] = None,
-        board_to_tcp: Optional[List[float]] = None
-    ) -> np.ndarray:
-        """
-        计算位置误差 (3D误差)
-
-        将标定板3D点转换到基座坐标系，与:
-        - Eye-on-Hand: 粗略估计的标定板位置比较
-        - Eye-to-Hand: TCP @ board_to_tcp 比较
-
-        Args:
-            robot_poses: 机器人位姿列表
-            camera_poses: 相机观测位姿列表 (T_cam_board)
-            X: 手眼变换矩阵
-            board_to_base: 标定板相对于基座的位姿 (Eye-on-Hand用)
-            board_to_tcp: 标定板相对于TCP的位姿 (Eye-to-Hand用)
-
-        Returns:
-            errors: 位置误差列表 (米)
-        """
-        errors: List[float] = []
-
-        for tcp, cam_pose in zip(robot_poses, camera_poses):
-            if self.mode == 'eye_on_hand':
-                T_measured = tcp @ X @ cam_pose
-                p_measured = T_measured[:3, 3]
-
-                # 与粗略估计比较
-                if board_to_base is not None:
-                    T_expected = pose_to_mat(board_to_base)
-                    p_expected = T_expected[:3, 3]
-                    error = float(np.linalg.norm(p_measured - p_expected))
-                    errors.append(error)
-                else:
-                    errors.append(float(0.0))
-            else:
-                T_measured = X @ cam_pose
-                p_measured = T_measured[:3, 3]
-
-                # 与粗略估计比较
-                if board_to_tcp is not None:
-                    T_board_tcp = pose_to_mat(board_to_tcp)
-                    T_expected = tcp @ T_board_tcp
-                    p_expected = T_expected[:3, 3]
-                    error = float(np.linalg.norm(p_measured - p_expected))
-                    errors.append(error)
-                else:
-                    errors.append(float(0.0))
-
-        return np.array(errors)
-
-    def calculate_rotation_error(
-        self,
-        robot_poses: List[np.ndarray],
-        camera_poses: List[np.ndarray],
-        X: np.ndarray,
-        board_to_base: Optional[List[float]] = None,
-        board_to_tcp: Optional[List[float]] = None
-    ) -> np.ndarray:
-        """
-        计算旋转误差（相对角，单位 rad）
-
-        对比对象与位置误差保持一致：
-        - Eye-on-Hand: 将观测到的标定板姿态(T_base_board)与 board_to_base 粗略姿态比较。
-                - Eye-to-Hand: 将观测到的标定板姿态(T_base_board)与
-                    由 board_to_tcp 转换得到的基座系参考姿态(T_base_tcp @ T_board_tcp)比较。
-
-        若未提供粗略姿态，则以观测平均姿态作为参考。
-        """
-        errors_rad: List[float] = []
-
-        if self.mode == 'eye_on_hand':
-            measured_list = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
-            if board_to_base is not None:
-                T_ref = pose_to_mat(board_to_base)
-            else:
-                T_ref = np.mean(np.stack(measured_list), axis=0)
-
-            R_ref = T_ref[:3, :3]
-            for T_meas in measured_list:
-                angle_rad = self._rotation_angle_error_rad(T_meas[:3, :3], R_ref)
-                errors_rad.append(float(angle_rad))
-        else:
-            measured_list = [X @ cam_pose for cam_pose in camera_poses]
-            if board_to_tcp is not None:
-                T_board_tcp = pose_to_mat(board_to_tcp)
-                for tcp, T_meas in zip(robot_poses, measured_list):
-                    T_ref = tcp @ T_board_tcp
-                    angle_rad = self._rotation_angle_error_rad(T_meas[:3, :3], T_ref[:3, :3])
-                    errors_rad.append(float(angle_rad))
-            else:
-                T_ref = np.mean(np.stack(measured_list), axis=0)
-                R_ref = T_ref[:3, :3]
-                for T_meas in measured_list:
-                    angle_rad = self._rotation_angle_error_rad(T_meas[:3, :3], R_ref)
-                    errors_rad.append(float(angle_rad))
-
-        return np.array(errors_rad, dtype=np.float64)
+            raise ValueError('Robot/camera/corner sample counts differ')
+        targets = target_poses(self.mode, robot_poses, camera_poses, X)
+        provided = board_to_base if self.mode == 'eye_on_hand' else board_to_tcp
+        reference = average_transforms(targets) if provided is None else pose_to_mat(provided)
+        left = [invert_transform(t) for t in robot_poses] if self.mode == 'eye_on_hand' else robot_poses
+        predictions = invert_transform(X) @ np.asarray(left) @ reference
+        points = self._build_checkerboard_object_points()
+        errors = []
+        for pose, corners in zip(predictions, corners_2d_list):
+            corners = np.asarray(corners).reshape(-1, 2)
+            if len(corners) != len(points):
+                raise ValueError('Checkerboard corner count differs from the recorded geometry')
+            try:
+                errors.append(float(reprojection_errors(pose, points, corners, self.intrinsics, self.dist_coeffs).mean()))
+            except ValueError:
+                errors.append(float('nan'))
+        return np.asarray(errors)
 
     def calculate_pose_error_components(
-        self,
-        robot_poses: List[np.ndarray],
-        camera_poses: List[np.ndarray],
-        X: np.ndarray,
-        board_to_base: Optional[List[float]] = None,
-        board_to_tcp: Optional[List[float]] = None
+        self, robot_poses: List[np.ndarray], camera_poses: List[np.ndarray], X: np.ndarray,
+        board_to_base: Optional[List[float]] = None, board_to_tcp: Optional[List[float]] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Calculate signed pose error components in the reference target frame.
+        """Residuals in the reference target frame, including ETH's stationary TCP frame."""
+        targets = target_poses(self.mode, robot_poses, camera_poses, X)
+        provided = board_to_base if self.mode == 'eye_on_hand' else board_to_tcp
+        reference = average_transforms(targets) if provided is None else pose_to_mat(provided)
+        errors = invert_transform(reference) @ targets
+        return errors[:, :3, 3], Rotation.from_matrix(errors[:, :3, :3]).as_rotvec()
 
-        Returns:
-            position_components: shape (N, 3), unit meter, expressed in reference target frame.
-            rotation_components: shape (N, 3), unit rad, rotation vector of reference-to-measured error.
-        """
-        position_components: List[np.ndarray] = []
-        rotation_components: List[np.ndarray] = []
+    def calculate_position_error(self, robot_poses, camera_poses, X,
+                                 board_to_base=None, board_to_tcp=None) -> np.ndarray:
+        positions, _ = self.calculate_pose_error_components(robot_poses, camera_poses, X,
+                                                             board_to_base, board_to_tcp)
+        return np.linalg.norm(positions, axis=1)
 
-        if self.mode == 'eye_on_hand':
-            measured_list = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
-            if board_to_base is not None:
-                ref_list = [pose_to_mat(board_to_base) for _ in measured_list]
-            else:
-                T_ref = np.mean(np.stack(measured_list), axis=0)
-                ref_list = [T_ref for _ in measured_list]
-        else:
-            measured_list = [X @ cam_pose for cam_pose in camera_poses]
-            if board_to_tcp is not None:
-                T_tcp_board = pose_to_mat(board_to_tcp)
-                ref_list = [tcp @ T_tcp_board for tcp in robot_poses[:len(measured_list)]]
-            else:
-                T_ref = np.mean(np.stack(measured_list), axis=0)
-                ref_list = [T_ref for _ in measured_list]
+    def calculate_rotation_error(self, robot_poses, camera_poses, X,
+                                 board_to_base=None, board_to_tcp=None) -> np.ndarray:
+        _, rotations = self.calculate_pose_error_components(robot_poses, camera_poses, X,
+                                                             board_to_base, board_to_tcp)
+        return np.linalg.norm(rotations, axis=1)
 
-        for T_measured, T_ref in zip(measured_list, ref_list):
-            T_error = invert_transform(T_ref) @ T_measured
-            position_components.append(np.asarray(T_error[:3, 3], dtype=np.float64))
-            rotation_components.append(matrix_to_rotvec(T_error[:3, :3]))
-
-        return (
-            np.asarray(position_components, dtype=np.float64),
-            np.asarray(rotation_components, dtype=np.float64),
-        )
-
-    def calculate_spatial_consistency(
-        self,
-        robot_poses: List[np.ndarray],
-        camera_poses: List[np.ndarray],
-        X: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Calculate target-pose consistency without using a manually measured reference pose.
-
-        Eye-on-Hand: target should be fixed in base.
-        Eye-to-Hand: target should be fixed in TCP.
-        """
-        if self.mode == 'eye_on_hand':
-            target_poses = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
-        else:
-            target_poses = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
-
-        T_ref = self._average_transforms(target_poses)
-        pos_components: List[np.ndarray] = []
-        rot_components: List[np.ndarray] = []
-        pos_errors: List[float] = []
-        rot_errors: List[float] = []
-
-        for T_target in target_poses:
-            T_error = invert_transform(T_ref) @ T_target
-            pos_component = np.asarray(T_error[:3, 3], dtype=np.float64)
-            rot_component = matrix_to_rotvec(T_error[:3, :3])
-            pos_components.append(pos_component)
-            rot_components.append(rot_component)
-            pos_errors.append(float(np.linalg.norm(pos_component)))
-            rot_errors.append(float(np.linalg.norm(rot_component)))
-
-        return (
-            np.asarray(pos_errors, dtype=np.float64),
-            np.asarray(rot_errors, dtype=np.float64),
-            np.asarray(pos_components, dtype=np.float64),
-            np.asarray(rot_components, dtype=np.float64),
-        )
+    def calculate_spatial_consistency(self, robot_poses, camera_poses, X):
+        positions, rotations = self.calculate_pose_error_components(robot_poses, camera_poses, X)
+        return np.linalg.norm(positions, axis=1), np.linalg.norm(rotations, axis=1), positions, rotations
 
     def calculate_apriltag_observed_reprojection_error(
         self,
@@ -485,6 +167,10 @@ class ErrorCalculator:
         if self.backend not in ('apriltag', 'apriltag_board'):
             return np.array([], dtype=np.float64)
 
+        if not (len(camera_poses) == len(tag_corners_list) == len(tag_ids_list)):
+            raise ValueError('Pose/corner/ID sample counts differ')
+        if images is not None and len(images) != len(camera_poses):
+            raise ValueError('Image/pose sample counts differ')
         frame_errors: List[float] = []
         if images is None:
             images = [None] * len(camera_poses)  # type: ignore[list-item]
@@ -513,6 +199,8 @@ class ErrorCalculator:
         if self.backend not in ('apriltag', 'apriltag_board'):
             return np.array([], dtype=np.float64)
 
+        if len(robot_poses) != len(camera_poses):
+            raise ValueError('Robot/camera sample counts differ')
         if self.mode == 'eye_on_hand':
             target_poses = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses, camera_poses)]
             T_ref = self._average_transforms(target_poses)
@@ -522,6 +210,10 @@ class ErrorCalculator:
             T_ref = self._average_transforms(target_poses)
             predicted_camera_poses = [invert_transform(X) @ tcp @ T_ref for tcp in robot_poses]
 
+        if not (len(camera_poses) == len(tag_corners_list) == len(tag_ids_list)):
+            raise ValueError('Pose/corner/ID sample counts differ')
+        if images is not None and len(images) != len(camera_poses):
+            raise ValueError('Image/pose sample counts differ')
         frame_errors: List[float] = []
         if images is None:
             images = [None] * len(predicted_camera_poses)  # type: ignore[list-item]
@@ -569,13 +261,13 @@ class ErrorCalculator:
                 T_base_board_ref = pose_to_mat(board_to_base)
             else:
                 base_boards = [tcp @ X @ cam_pose for tcp, cam_pose in zip(robot_poses[:n], camera_poses[:n])]
-                T_base_board_ref = np.mean(np.stack(base_boards), axis=0)
+                T_base_board_ref = average_transforms(base_boards)
         else:
             if board_to_tcp is not None:
                 T_tcp_board_ref = pose_to_mat(board_to_tcp)
             else:
                 tcp_board_list = [invert_transform(tcp) @ X @ cam_pose for tcp, cam_pose in zip(robot_poses[:n], camera_poses[:n])]
-                T_tcp_board_ref = np.mean(np.stack(tcp_board_list), axis=0)
+                T_tcp_board_ref = average_transforms(tcp_board_list)
 
         idx = 0
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -643,8 +335,7 @@ class ErrorCalculator:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
 
             if len(reproj_pts) > 0:
-                pair_n = min(len(det_pts), len(reproj_pts))
-                frame_err = np.linalg.norm(det_pts[:pair_n] - reproj_pts[:pair_n], axis=1)
+                frame_err = np.linalg.norm(det_pts[valid] - reproj_pts, axis=1)
                 frame_err_text = f'mean err: {float(np.mean(frame_err)):.3f}px'
             else:
                 frame_err_text = 'mean err: N/A'
@@ -697,7 +388,7 @@ class ErrorCalculator:
             dict: 统计信息
         """
         if len(errors) == 0:
-            return {'mean': 0, 'max': 0, 'min': 0, 'std': 0, 'median': 0}
+            return dict.fromkeys(('mean', 'max', 'min', 'std', 'median'), float('nan'))
 
         return {
             'mean': np.mean(errors),
@@ -721,6 +412,9 @@ class ErrorCalculator:
             title: 报告标题
             unit: 输出单位, 可选 'auto'/'px'/'m'/'deg'
         """
+        if len(errors) == 0 or not np.isfinite(errors).all():
+            print(f'\n{title}: N/A (no complete valid evaluation data)')
+            return
         stats = self.compute_statistics(errors)
 
         print("\n" + "=" * 50)

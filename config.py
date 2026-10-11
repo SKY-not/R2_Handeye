@@ -53,20 +53,27 @@ CALIBRATION_MODES = ['eye_on_hand', 'eye_to_hand']
 
 # 标定参数配置
 CALIBRATION_CONFIG = {
-    'optimization_method': 'Nelder-Mead',
+    'optimization_method': 'least_squares',
     'min_calibration_points': 6,  # 最少标定点数
     'spatial_position_weight': 0.5,
     'spatial_rotation_weight': 0.5,
+    'position_scale_m': 0.001,
+    'rotation_scale_rad': np.pi / 180.0,
+    'capture_max_translation_m': 0.0005,
+    'capture_max_rotation_rad': np.deg2rad(0.1),
 }
 
 # AprilTag 标定配置
-# 参考位姿见 CHECKERBOARD_CONFIG 中的 board_to_base_rough 和 board_to_tcp_rough
+# 单标签参考位姿需独立测量；None 表示只报告空间一致性。
 APRILTAG_CONFIG = {
     'family': 'tag36h11',
     'tag_size': 0.03,  # 米
     'target_tag_id': 1,
     'decision_margin_threshold': 20.0,
     'min_area_ratio': 0.0005,
+    'max_reprojection_error_px': 2.0,
+    'board_to_base_rough': None,
+    'board_to_tcp_rough': None,
 }
 
 # Four-AprilTag board calibration config.
@@ -81,8 +88,13 @@ APRILTAG_BOARD_CONFIG = {
         3: [-0.015, 0.015, 0.0],
         4: [0.015, 0.015, 0.0],
     },
+    # Rotation vectors (radians) from each decoded tag frame into the board frame.
+    'tag_rotvecs': {1: [0, 0, 0], 2: [0, 0, 0], 3: [0, 0, 0], 4: [0, 0, 0]},
     'decision_margin_threshold': 20.0,
     'min_area_ratio': 0.0005,
+    'min_visible_tags': 2,
+    'max_reprojection_error_px': 2.0,
+    'board_to_base_rough': None,
     # Eye-to-Hand: board center pose relative to TCP, [m, m, m, deg, deg, deg].
     'board_to_tcp_rough': [-0.0006, 0.0, 0.070, 0.0, -90.0, 0.0],
 }

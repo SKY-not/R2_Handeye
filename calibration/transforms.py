@@ -4,6 +4,7 @@
 
 from typing import Sequence, Union
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 def vec_to_skew(v: np.ndarray) -> np.ndarray:
@@ -23,25 +24,51 @@ def skew_to_vec(skew: np.ndarray) -> np.ndarray:
 def rotvec_to_matrix(rotvec: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
     """Convert a rotation vector to a 3x3 rotation matrix."""
     v = np.asarray(rotvec, dtype=np.float64).reshape(3)
-    theta = float(np.linalg.norm(v))
-    if theta < 1e-8:
-        return np.eye(3, dtype=np.float64)
-
-    axis = v / theta
-    K = vec_to_skew(axis)
-    R = np.eye(3, dtype=np.float64) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
-    return np.asarray(R, dtype=np.float64)
+    return Rotation.from_rotvec(v).as_matrix()
 
 
 def matrix_to_rotvec(R: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a rotation vector."""
     Rn = np.asarray(R, dtype=np.float64).reshape(3, 3)
-    theta = float(np.arccos(np.clip((np.trace(Rn) - 1.0) / 2.0, -1.0, 1.0)))
-    if abs(theta) < 1e-8:
-        return np.zeros(3, dtype=np.float64)
+    return Rotation.from_matrix(Rn).as_rotvec()
 
-    log_R = (theta / (2.0 * np.sin(theta))) * (Rn - Rn.T)
-    return skew_to_vec(log_R)
+
+def validate_transform(T: np.ndarray, name: str = 'transform') -> np.ndarray:
+    """Reject malformed SE(3) data instead of silently projecting it onto SO(3)."""
+    value = np.asarray(T, dtype=np.float64)
+    if value.shape != (4, 4) or not np.isfinite(value).all():
+        raise ValueError(f'{name}: expected a finite 4x4 transform')
+    R = value[:3, :3]
+    if (not np.allclose(value[3], [0, 0, 0, 1], atol=1e-7)
+            or not np.allclose(R.T @ R, np.eye(3), atol=1e-5)
+            or not np.isclose(np.linalg.det(R), 1.0, atol=1e-5)):
+        raise ValueError(f'{name}: invalid rigid transform')
+    return value
+
+
+def average_transforms(transforms: Sequence[np.ndarray]) -> np.ndarray:
+    """Arithmetic translation mean and chordal rotation mean; never average matrices."""
+    values = np.asarray(transforms, dtype=np.float64)
+    if values.ndim != 3 or values.shape[1:] != (4, 4) or len(values) == 0:
+        raise ValueError('At least one 4x4 transform is required')
+    result = np.eye(4)
+    result[:3, :3] = Rotation.from_matrix(values[:, :3, :3]).mean().as_matrix()
+    result[:3, 3] = values[:, :3, 3].mean(axis=0)
+    return result
+
+
+def target_poses(mode: str, robot_poses: Sequence[np.ndarray],
+                 camera_poses: Sequence[np.ndarray], X: np.ndarray) -> np.ndarray:
+    """Target poses in their stationary frame: base for EOH, TCP for ETH."""
+    if len(robot_poses) != len(camera_poses) or len(robot_poses) == 0:
+        raise ValueError('Robot and camera poses must be nonempty and paired')
+    if mode == 'eye_on_hand':
+        left = np.asarray(robot_poses)
+    elif mode == 'eye_to_hand':
+        left = np.asarray([invert_transform(t) for t in robot_poses])
+    else:
+        raise ValueError(f'Unknown calibration mode: {mode}')
+    return left @ X @ np.asarray(camera_poses)
 
 
 def pose_to_mat(pose: Union[np.ndarray, Sequence[float]]) -> np.ndarray:

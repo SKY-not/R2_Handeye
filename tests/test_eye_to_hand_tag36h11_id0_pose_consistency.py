@@ -11,6 +11,7 @@ Keys:
 from __future__ import annotations
 
 import csv
+import argparse
 import os
 import sys
 import time
@@ -26,7 +27,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from camera.realsense import RealSenseCamera
 
 
 TAG_FAMILY = "tag36h11"
@@ -239,6 +239,7 @@ def mean_transform(transforms: list[np.ndarray]) -> np.ndarray:
 
 
 def analyze_samples(samples: list[Sample]) -> Analysis:
+    """Visual repeatability in the mean tag frame; invariant to the hand-eye transform."""
     mean = mean_transform([sample.t_base_tag for sample in samples])
     mean_inv = invert_transform(mean)
 
@@ -482,11 +483,16 @@ def print_summary(samples: list[Sample], analysis: Analysis) -> None:
     reprojection = np.asarray([sample.reprojection_error_px for sample in samples], dtype=np.float64)
     print("Reprojection error (px):")
     print(f"  mean={np.mean(reprojection):.3f}, std={np.std(reprojection):.3f}, max={np.max(reprojection):.3f}")
-    print(f"\nCSV written to: {CSV_FILE}")
+    print("\nStatic visual repeatability in the mean tag frame; not hand-eye accuracy.")
 
 
 def main() -> None:
-    t_base_camera = load_transform(HANDEYE_FILE)
+    parser = argparse.ArgumentParser(description='Static visual repeatability; not hand-eye accuracy validation.')
+    parser.add_argument('--handeye-file', default=HANDEYE_FILE)
+    parser.add_argument('--csv', default=CSV_FILE)
+    args = parser.parse_args()
+    from camera.realsense import RealSenseCamera
+    t_base_camera = load_transform(args.handeye_file)
     detector = create_apriltag_detector()
     samples: list[Sample] = []
 
@@ -506,7 +512,7 @@ def main() -> None:
 
     print("\nEye-to-hand tag pose consistency test")
     print(f"  tag: {TAG_FAMILY}, id={TARGET_TAG_ID}, size={TAG_SIZE_M * 1000.0:.1f} mm")
-    print(f"  hand-eye: {HANDEYE_FILE}")
+    print(f"  hand-eye: {args.handeye_file}")
     print("  keys: Enter=capture, Space=finish+analyze, Esc=quit")
 
     try:
@@ -588,7 +594,8 @@ def main() -> None:
                     print("Need at least 2 samples for consistency analysis.")
                     continue
                 analysis = analyze_samples(samples)
-                write_csv(samples, analysis, CSV_FILE)
+                write_csv(samples, analysis, args.csv)
+                print(f"CSV written to: {args.csv}")
                 print_summary(samples, analysis)
                 cv2.destroyWindow("tag36h11 id=0 eye-to-hand consistency")
                 show_analysis(samples, analysis)

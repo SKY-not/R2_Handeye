@@ -68,7 +68,7 @@ class ResultVisualizer:
         # 1. Draw all TCP positions (blue dots)
         tcp_positions = np.array([p[:3, 3] for p in robot_poses])
         ax.scatter(tcp_positions[:, 0], tcp_positions[:, 1], tcp_positions[:, 2],
-                  c='blue', marker='o', s=80, label='TCP (flange)', alpha=0.7)
+                  c='blue', marker='o', s=80, label='Configured TCP', alpha=0.7)
         if robot_poses:
             # Show one explicit TCP coordinate frame for readability.
             self._draw_coordinate_frame(ax, robot_poses[0], 'TCP', 'blue', 0.08 * frame_scale)

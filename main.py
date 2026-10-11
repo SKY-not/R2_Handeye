@@ -8,16 +8,18 @@
 import sys
 import os
 import numpy as np
-from typing import List, Sequence, cast
+from typing import List
+from pathlib import Path
+import csv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from device_manager import DeviceManager
 from data_collector import CalibDataCollector
 from calibration_solver import CalibrationSolver
 from error_calculator import ErrorCalculator
 from result_visualizer import ResultVisualizer
-from config import APRILTAG_BOARD_CONFIG, CHECKERBOARD_CONFIG, CALIBRATION_CONFIG
+from config import get_data_path
+from calibration.targets import target_config
 
 
 def _rough_pose_deg_to_rad(pose: List[float]) -> List[float]:
@@ -68,293 +70,117 @@ def select_backend() -> str:
             print("无效选择，请重新输入")
 
 
-def load_rough_pose(mode: str, backend: str) -> List[float]:
-    """Load rough target pose for visualization/error reference."""
-    if mode == 'eye_on_hand':
-        # Eye-on-Hand: target pose relative to robot base.
-        pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_base_rough', [0, 0, 0, 0, 0, 0])
-        pose_deg = [float(v) for v in cast(Sequence[float], pose_deg_any)]
-        pose = _rough_pose_deg_to_rad(pose_deg)
-        print(f"\n加载 Eye-on-Hand 粗略位姿(角度输入): {pose_deg}")
-        print(f"转换后用于计算(弧度): {pose}")
-        return pose
-    else:
-        # Eye-to-Hand: target pose relative to TCP.
-        if backend == 'apriltag_board':
-            pose_deg_any = APRILTAG_BOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
+def load_rough_pose(mode: str, backend: str, target=None):
+    config = target_config(backend) if target is None else target
+    key = 'board_to_base_rough' if mode == 'eye_on_hand' else 'board_to_tcp_rough'
+    value = config.get(key)
+    return None if value is None else _rough_pose_deg_to_rad(value)
+
+
+def select_session(mode: str) -> Path:
+    base = Path(get_data_path(mode)['root'])
+    sessions = sorted((base / 'sessions').glob('*/session.json'), reverse=True)
+    choices = [p.parent for p in sessions]
+    if (base / 'poses').exists():
+        choices.append(base)
+    if not choices:
+        raise ValueError('No saved sessions found; collect a new session first')
+    for i, path in enumerate(choices, 1):
+        suffix = ' [legacy: pose consistency only]' if not (path / 'session.json').exists() else ''
+        print(f'{i}. {path.name}{suffix}')
+    while True:
+        choice = input('Session number: ').strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(choices):
+            return choices[int(choice) - 1]
+
+
+def evaluate(collector, solver, result, robot, camera, corners, images, tag_corners, tag_ids):
+    calculator = ErrorCalculator(collector.mode, solver.intrinsics, solver.dist_coeffs,
+                                 collector.backend, target=collector.target_config)
+    X = result['X']
+    initial_pos, initial_rot, _, _ = calculator.calculate_spatial_consistency(robot, camera, result['initial_X'])
+    positions, rotations, position_components, rotation_components = calculator.calculate_spatial_consistency(robot, camera, X)
+    print(f'SVD -> final mean residual: {initial_pos.mean()*1000:.3f} -> {positions.mean()*1000:.3f} mm; '
+          f'{np.degrees(initial_rot).mean():.3f} -> {np.degrees(rotations).mean():.3f} deg')
+    calculator.print_error_report(positions, 'Training-sample spatial consistency', unit='m')
+    calculator.print_error_report(np.degrees(rotations), 'Training-sample rotation consistency', unit='deg')
+    print('These are fit residuals, not independent absolute-accuracy measurements.')
+    rough = None if collector.legacy_pose_only else load_rough_pose(collector.mode, collector.backend, collector.target_config)
+    reference = {'board_to_base' if collector.mode == 'eye_on_hand' else 'board_to_tcp': rough}
+    if rough is not None:
+        calculator.print_error_report(calculator.calculate_position_error(robot, camera, X, **reference),
+                                      'Deviation from manually estimated reference (not ground truth)', unit='m')
+        calculator.print_error_report(np.degrees(calculator.calculate_rotation_error(robot, camera, X, **reference)),
+                                      'Rotation deviation from manually estimated reference', unit='deg')
+    projection = None
+    if not collector.legacy_pose_only:
+        if collector.backend == 'checkerboard':
+            projection = calculator.calculate_reprojection_error(robot, camera, corners, X)
         else:
-            pose_deg_any = CHECKERBOARD_CONFIG.get('board_to_tcp_rough', [0, 0, 0, 0, 0, 0])
-        pose_deg = [float(v) for v in cast(Sequence[float], pose_deg_any)]
-        pose = _rough_pose_deg_to_rad(pose_deg)
-        print(f"\n加载 Eye-to-Hand 粗略位姿(角度输入): {pose_deg}")
-        print(f"转换后用于计算(弧度): {pose}")
-        return pose
+            observed = calculator.calculate_apriltag_observed_reprojection_error(camera, tag_corners, tag_ids, images)
+            calculator.print_error_report(observed, 'Observed-tag reprojection', unit='px')
+            projection = calculator.calculate_apriltag_chain_reprojection_error(robot, camera, tag_corners, tag_ids, X, images)
+        calculator.print_error_report(projection, 'Full-chain reprojection', unit='px')
+    if result['output_path']:
+        path = Path(result['output_path']) / 'residuals.csv'
+        with path.open('w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow(['frame', 'translation_mm', 'rotation_deg', 'chain_reprojection_px'])
+            for i, (pos, rot) in enumerate(zip(positions, rotations)):
+                pixel = '' if projection is None else projection[i]
+                writer.writerow([solver.sample_indices[i], pos * 1000, np.degrees(rot), pixel])
+    if collector.backend == 'checkerboard' and input('View corner reprojections? (y/n): ').lower() == 'y':
+        calculator.visualize_reprojection_frames(images, robot, camera, corners, X)
+    visualizer = ResultVisualizer(collector.mode)
+    if input('Show 3D visualization? (y/n): ').lower() == 'y':
+        visualizer.visualize(robot, X, camera_poses=camera, **reference)
+    if input('Show consistency plots? (y/n): ').lower() == 'y':
+        visualizer.visualize_position_rotation_errors(positions, np.degrees(rotations),
+                                                       pos_unit='mm', rot_unit='deg', pos_scale=1000)
+        visualizer.visualize_pose_error_components(position_components, rotation_components,
+                                                   pos_unit='mm', rot_unit='deg', pos_scale=1000,
+                                                   rot_scale=180 / np.pi,
+                                                   title='Consistency in the mean target frame')
 
 
 def main() -> None:
-    """主函数"""
-    print("=" * 50)
-    print("手眼标定系统")
-    print("=" * 50)
-
-    # 1. 选择模式
-    mode = select_mode()
-    mode_name = "Eye-on-Hand" if mode == "eye_on_hand" else "Eye-to-Hand"
-    print(f"\n已选择: {mode_name}")
-
-    backend = select_backend()
-    print(f"已选择后端: {backend}")
-
-    # 加载粗略位姿 (仅用于可视化/误差计算参考)
-    rough_pose = load_rough_pose(mode, backend)
-
-    # 2. 连接设备
-    device_mgr = DeviceManager()
-    success = device_mgr.connect()
-
-    if not success:
-        print("\n设备连接失败，请检查配置后重试")
-        return
-
-    robot = device_mgr.get_robot()
-    camera = device_mgr.get_camera()
-    if robot is None or camera is None:
-        print("设备对象为空，请检查连接流程")
-        device_mgr.disconnect()
-        return
-
-    # 3. 数据采集
-    print("\n" + "=" * 50)
-    print("数据采集")
-    print("=" * 50)
-
-    collector = CalibDataCollector(robot, camera, mode, backend=backend)
-
-    # 询问是新建采集还是使用已有数据
-    print("\n请选择:")
-    print("  1. 新建数据采集")
-    print("  2. 使用已有数据")
-
-    choice = input("请输入选项 (1/2): ").strip()
-
-    if choice == '1':
-        collector.clear_old_data()
-        collector.collect_loop()
-    else:
-        data = collector.get_saved_data()
-        print(f"已加载 {len(data)} 个已有数据点")
-
-    min_required_cfg = CALIBRATION_CONFIG.get('min_calibration_points', 6)
-    min_required = max(6, int(cast(int, min_required_cfg)))
-    current_count = len(collector.get_saved_data())
-    if current_count < min_required:
-        print(f"\n当前有效样本数: {current_count}，少于最小要求: {min_required}")
-        print("请选择:")
-        print("  1. 继续采集")
-        print("  2. 退出流程")
-        decision = input("请输入选项 (1/2): ").strip()
-        if decision == '1':
-            collector.collect_loop()
-        else:
-            print("用户选择退出流程")
-            device_mgr.disconnect()
-            return
-
-    # 4. 标定计算
-    solver = CalibrationSolver(
-        mode,
-        intrinsics=camera.intrinsics,
-        dist_coeffs=getattr(camera, 'dist_coeffs', None),
-        backend=backend
-    )
+    mode, backend = select_mode(), select_backend()
+    choice = input('1: 新建采集，2: 离线复算已有会话：').strip()
+    manager = None
     try:
-        robot_poses, camera_poses, corners_2d_list, images, tag_corners_list, tag_ids_list = solver.load_data(collector)
-    except ValueError as e:
-        print(f"错误: {e}")
-        print("请继续采集数据后重试，或退出流程。")
-        device_mgr.disconnect()
-        return
-
-    result = solver.solve(robot_poses, camera_poses, corners_2d_list)
-
-    # 5. 误差计算
-    print("\n" + "=" * 50)
-    print("误差计算")
-    print("=" * 50)
-
-    error_calc = ErrorCalculator(
-        mode,
-        intrinsics=camera.intrinsics,
-        dist_coeffs=camera.dist_coeffs,
-        backend=backend
-    )
-
-    # 根据模式设置参数
-    if mode == 'eye_on_hand':
-        position_errors = error_calc.calculate_position_error(
-            robot_poses, camera_poses, result['X'],
-            board_to_base=rough_pose
-        )
-        rotation_errors = error_calc.calculate_rotation_error(
-            robot_poses,
-            camera_poses,
-            result['X'],
-            board_to_base=rough_pose
-        )
-        position_components, rotation_components = error_calc.calculate_pose_error_components(
-            robot_poses,
-            camera_poses,
-            result['X'],
-            board_to_base=rough_pose
-        )
-    else:
-        position_errors = error_calc.calculate_position_error(
-            robot_poses, camera_poses, result['X'],
-            board_to_tcp=rough_pose
-        )
-        rotation_errors = error_calc.calculate_rotation_error(
-            robot_poses,
-            camera_poses,
-            result['X'],
-            board_to_tcp=rough_pose
-        )
-        position_components, rotation_components = error_calc.calculate_pose_error_components(
-            robot_poses,
-            camera_poses,
-            result['X'],
-            board_to_tcp=rough_pose
-        )
-
-    # calculate_rotation_error returns radians; convert to degrees for display.
-    rotation_errors_deg = np.degrees(rotation_errors)
-    spatial_pos_errors, spatial_rot_errors, spatial_pos_components, spatial_rot_components = (
-        error_calc.calculate_spatial_consistency(robot_poses, camera_poses, result['X'])
-    )
-    spatial_rot_errors_deg = np.degrees(spatial_rot_errors)
-
-    reproj_errors = np.array([], dtype=np.float64)
-    apriltag_observed_reproj_errors = np.array([], dtype=np.float64)
-    apriltag_chain_reproj_errors = np.array([], dtype=np.float64)
-    if backend == 'checkerboard':
-        reproj_errors = error_calc.calculate_reprojection_error(
-            robot_poses,
-            camera_poses,
-            corners_2d_list,
-            result['X']
-        )
-    else:
-        apriltag_observed_reproj_errors = error_calc.calculate_apriltag_observed_reprojection_error(
-            camera_poses,
-            tag_corners_list,
-            tag_ids_list,
-            images
-        )
-        apriltag_chain_reproj_errors = error_calc.calculate_apriltag_chain_reprojection_error(
-            robot_poses,
-            camera_poses,
-            tag_corners_list,
-            tag_ids_list,
-            result['X'],
-            images
-        )
-
-    error_calc.print_error_report(position_errors, "位置误差报告", unit='m')
-    error_calc.print_error_report(rotation_errors_deg, "旋转误差报告 (deg)", unit='deg')
-    error_calc.print_error_report(spatial_pos_errors, "空间一致性位置误差报告", unit='m')
-    error_calc.print_error_report(spatial_rot_errors_deg, "空间一致性旋转误差报告 (deg)", unit='deg')
-    if backend == 'checkerboard':
-        error_calc.print_error_report(reproj_errors, "重投影误差报告 (px)", unit='px')
-    else:
-        error_calc.print_error_report(apriltag_observed_reproj_errors, "AprilTag观测位姿重投影误差报告 (px)", unit='px')
-        error_calc.print_error_report(apriltag_chain_reproj_errors, "AprilTag全链路重投影误差报告 (px)", unit='px')
-
-    if backend == 'checkerboard':
-        show_reproj_frames = input("是否逐帧查看重投影角点对比? (y/n): ").strip().lower()
-        if show_reproj_frames == 'y':
-            if mode == 'eye_on_hand':
-                error_calc.visualize_reprojection_frames(
-                    images,
-                    robot_poses,
-                    camera_poses,
-                    corners_2d_list,
-                    result['X'],
-                    board_to_base=rough_pose
-                )
-            else:
-                error_calc.visualize_reprojection_frames(
-                    images,
-                    robot_poses,
-                    camera_poses,
-                    corners_2d_list,
-                    result['X'],
-                    board_to_tcp=rough_pose
-                )
-
-    # 6. 可视化
-    print("\n" + "=" * 50)
-    print("可视化")
-    print("=" * 50)
-
-    visualizer = ResultVisualizer(mode)
-
-    show_viz = input("是否显示3D可视化? (y/n): ").strip().lower()
-    if show_viz == 'y':
-        if mode == 'eye_on_hand':
-            visualizer.visualize(
-                robot_poses, result['X'],
-                camera_poses=camera_poses,
-                board_to_base=rough_pose
-            )
+        if choice == '1':
+            from device_manager import DeviceManager
+            manager = DeviceManager()
+            if not manager.connect():
+                return
+            collector = CalibDataCollector(manager.get_robot(), manager.get_camera(), mode, backend)
+            collector.start_new_session()
+            collector.collect_loop()
+        elif choice == '2':
+            root = select_session(mode)
+            legacy = not (root / 'session.json').exists()
+            if legacy:
+                print('旧数据缺少相机与标定板元信息，只能评价历史位姿一致性。')
+                if input('以历史位姿模式继续（不计算重投影）？(y/n): ').strip().lower() != 'y':
+                    return
+            collector = CalibDataCollector.from_session(str(root), mode, backend, legacy_pose_only=legacy)
         else:
-            visualizer.visualize(
-                robot_poses, result['X'],
-                camera_poses=camera_poses,
-                board_to_tcp=rough_pose
-            )
-
-    show_errors = input("是否显示误差分布图? (y/n): ").strip().lower()
-    if show_errors == 'y':
-        visualizer.visualize_position_rotation_errors(
-            position_errors,
-            rotation_errors_deg,
-            pos_unit='mm',
-            rot_unit='deg',
-            pos_scale=1000.0,
-            rot_scale=1.0
-        )
-        visualizer.visualize_pose_error_components(
-            position_components,
-            rotation_components,
-            pos_unit='mm',
-            rot_unit='deg',
-            pos_scale=1000.0,
-            rot_scale=180.0 / np.pi,
-            title='Pose Error Components in Provided Reference Target Frame'
-        )
-        visualizer.visualize_pose_error_components(
-            spatial_pos_components,
-            spatial_rot_components,
-            pos_unit='mm',
-            rot_unit='deg',
-            pos_scale=1000.0,
-            rot_scale=180.0 / np.pi,
-            title='Spatial Consistency Components Around Mean Target Pose'
-        )
-
-    # 7. 清理
-    device_mgr.disconnect()
-
-    print("\n" + "=" * 50)
-    print("标定完成!")
-    print("=" * 50)
+            raise ValueError('Choose 1 or 2')
+        solver = CalibrationSolver(mode, collector.intrinsics, collector.dist_coeffs, backend)
+        robot, camera, corners, images, tag_corners, tag_ids = solver.load_data(collector)
+        result = solver.solve(robot, camera, corners)
+        evaluate(collector, solver, result, robot, camera, corners, images, tag_corners, tag_ids)
+        print(f"Result saved: {result['output_path']}")
+    finally:
+        if manager is not None:
+            manager.disconnect()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n用户中断程序")
-    except Exception as e:
-        print(f"\n错误: {e}")
-        import traceback
-        traceback.print_exc()
+        print('Interrupted')
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(f'Calibration failed: {exc}')
+        sys.exit(1)

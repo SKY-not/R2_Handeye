@@ -9,6 +9,7 @@ import numpy as np
 import pyrealsense2 as rs
 import cv2
 from typing import Any, Optional, Tuple
+from camera.model import opencv_distortion
 
 
 class RealSenseCamera:
@@ -39,6 +40,7 @@ class RealSenseCamera:
         self.config: Optional[Any] = None
         self.intrinsics: Optional[np.ndarray] = None
         self.dist_coeffs: Optional[np.ndarray] = None
+        self.distortion_model = 'none'
         self.depth_scale: Optional[float] = None
         self.align: Optional[Any] = None
 
@@ -65,7 +67,14 @@ class RealSenseCamera:
         # 获取内参
         rgb_profile = profile.get_stream(rs.stream.color)
         self.intrinsics = np.asarray(self._get_intrinsics(rgb_profile), dtype=np.float64)
-        self.dist_coeffs = np.asarray(self._get_dist_coeffs(rgb_profile), dtype=np.float64).reshape(-1, 1)
+        try:
+            self.dist_coeffs = np.asarray(self._get_dist_coeffs(rgb_profile), dtype=np.float64).reshape(-1, 1)
+        except Exception:
+            self.disconnect()
+            raise
+        video = rgb_profile.as_video_stream_profile()
+        self.im_width, self.im_height, self.fps = video.width(), video.height(), video.fps()
+        self.device_id = profile.get_device().get_info(rs.camera_info.serial_number)
 
         # 获取深度缩放因子
         self.depth_scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
@@ -182,16 +191,9 @@ class RealSenseCamera:
         """
         intrinsics = self.intrinsics
         assert intrinsics is not None
-        fx = intrinsics[0, 0]
-        fy = intrinsics[1, 1]
-        cx = intrinsics[0, 2]
-        cy = intrinsics[1, 2]
-
-        X = (u - cx) * depth / fx
-        Y = (v - cy) * depth / fy
-        Z = depth
-
-        return np.array([X, Y, Z], dtype=np.float64)
+        normalized = cv2.undistortPoints(np.array([[[u, v]]], dtype=np.float64),
+                                         intrinsics, self.dist_coeffs).reshape(2)
+        return np.r_[normalized * depth, depth]
 
     def _get_intrinsics(self, rgb_profile: Any) -> np.ndarray:
         """
@@ -220,10 +222,8 @@ class RealSenseCamera:
     def _get_dist_coeffs(self, rgb_profile: Any) -> np.ndarray:
         """获取相机畸变系数 (k1, k2, p1, p2, k3)."""
         raw_intrinsics = rgb_profile.as_video_stream_profile().get_intrinsics()
-        coeffs = list(raw_intrinsics.coeffs)
-        if len(coeffs) >= 5:
-            return np.array(coeffs[:5], dtype=np.float64)
-        return np.zeros(5, dtype=np.float64)
+        self.distortion_model = str(raw_intrinsics.model).split('.')[-1]
+        return opencv_distortion(self.distortion_model, raw_intrinsics.coeffs)
 
     def get_default_intrinsics(self) -> np.ndarray:
         """获取D405默认内参 (可用于未标定的情况)"""

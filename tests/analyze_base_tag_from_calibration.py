@@ -75,7 +75,7 @@ def camera_transforms(data: dict[str, np.ndarray]) -> np.ndarray:
 
 
 def analyze(t_base_tag: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return mean transform, translation residuals in mm, rotation residuals in deg."""
+    """Return mean pose, base-frame translation (mm), mean-tag rotation residuals (deg)."""
     mean = np.eye(4, dtype=np.float64)
     mean[:3, :3] = Rotation.from_matrix(t_base_tag[:, :3, :3]).mean().as_matrix()
     mean[:3, 3] = np.mean(t_base_tag[:, :3, 3], axis=0)
@@ -83,7 +83,7 @@ def analyze(t_base_tag: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     mean_inverse[:3, :3] = mean[:3, :3].T
     mean_inverse[:3, 3] = -mean_inverse[:3, :3] @ mean[:3, 3]
     residual = np.einsum("ij,njk->nik", mean_inverse, t_base_tag)
-    translation_mm = residual[:, :3, 3] * 1000.0
+    translation_mm = (t_base_tag[:, :3, 3] - mean[:3, 3]) * 1000.0
     rotation_deg = Rotation.from_matrix(residual[:, :3, :3]).as_rotvec() * (180.0 / np.pi)
     return mean, translation_mm, rotation_deg
 
@@ -92,6 +92,7 @@ def print_summary(data: dict[str, np.ndarray], mean: np.ndarray, translation_mm:
     translation_norm = np.linalg.norm(translation_mm, axis=1)
     rotation_norm = np.linalg.norm(rotation_deg, axis=1)
     dz = translation_mm[:, 2]
+    print("Static visual repeatability only; this does not validate hand-eye accuracy.")
     print(f"Samples: {len(dz)}")
     print("Mean T_base_tag (recomputed):")
     print(np.array2string(mean, precision=8, suppress_small=False))

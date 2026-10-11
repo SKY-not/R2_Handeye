@@ -8,14 +8,17 @@ import numpy as np
 import os
 import sys
 import cv2
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, cast
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from calibration.solver_axxb import HandEyeSolver
 from calibration.optimizer import HandEyeOptimizer
-from calibration.transforms import invert_transform
-from config import CHECKERBOARD_CONFIG, CALIBRATION_CONFIG, get_results_path, REALSENSE_CONFIG
+from calibration.transforms import invert_transform, validate_transform
+from calibration.targets import target_config, checkerboard_points, tag_correspondences
+from calibration.session import new_run_directory, write_json
+from config import CALIBRATION_CONFIG, get_results_path, REALSENSE_CONFIG
 
 
 class DataCollectorProtocol(Protocol):
@@ -46,6 +49,11 @@ class CalibrationSolver:
         """
         self.mode = mode
         self.backend = backend
+        self.target_config = target_config(backend)
+        self.session_metadata = None
+        self.legacy_pose_only = False
+        self.output_path = None
+        self.source_session = None
         self.solver = HandEyeSolver(mode)
         self.optimizer = HandEyeOptimizer(mode)
 
@@ -70,15 +78,7 @@ class CalibrationSolver:
 
     def _build_checkerboard_object_points(self) -> np.ndarray:
         """Build checkerboard object points in board coordinate system."""
-        cb_size_any = CHECKERBOARD_CONFIG['size']
-        cb_size_tuple = cast(tuple[int, int], cb_size_any)
-        cb_cols = int(cb_size_tuple[0])
-        cb_rows = int(cb_size_tuple[1])
-        square = float(cast(float, CHECKERBOARD_CONFIG['square_size']))
-        objp = np.zeros((cb_cols * cb_rows, 3), dtype=np.float32)
-        objp[:, :2] = np.mgrid[0:cb_cols, 0:cb_rows].T.reshape(-1, 2)
-        objp *= square
-        return objp
+        return checkerboard_points(self.target_config)
 
     @staticmethod
     def _rvec_tvec_to_transform(rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
@@ -93,24 +93,6 @@ class CalibrationSolver:
     def _invert_transform(T: np.ndarray) -> np.ndarray:
         """Invert 4x4 homogeneous transform."""
         return invert_transform(T)
-
-    def _save_pnp_debug_data(
-        self,
-        frame_index: str,
-        objp: np.ndarray,
-        corners_2d: np.ndarray,
-        camera_pose: np.ndarray
-    ) -> None:
-        """Save per-frame PnP inputs/outputs for offline debugging."""
-        debug_dir = os.path.join(get_results_path(self.mode), 'pnp_debug')
-        os.makedirs(debug_dir, exist_ok=True)
-        debug_path = os.path.join(debug_dir, f'pnp_{frame_index}.npz')
-        np.savez(
-            debug_path,
-            objp=np.asarray(objp, dtype=np.float32),
-            corners_2d=np.asarray(corners_2d, dtype=np.float32),
-            camera_pose=np.asarray(camera_pose, dtype=np.float64),
-        )
 
     def load_data(
         self,
@@ -130,9 +112,18 @@ class CalibrationSolver:
             tag_corners_list: 与有效帧对齐的 AprilTag 角点列表
             tag_ids_list: 与有效帧对齐的 AprilTag id 列表
         """
+        self.session_metadata = getattr(data_collector, 'session_metadata', None)
+        self.legacy_pose_only = bool(getattr(data_collector, 'legacy_pose_only', False))
+        self.source_session = getattr(data_collector, 'data_path', {}).get('root')
+        if self.session_metadata is None and not self.legacy_pose_only:
+            raise ValueError('Session metadata required; explicitly import legacy poses for consistency-only analysis')
+        if self.session_metadata is not None and (
+                self.session_metadata['mode'] != self.mode or self.session_metadata['backend'] != self.backend):
+            raise ValueError('Solver mode/backend differs from the recorded session')
+        self.target_config = getattr(data_collector, 'target_config', self.target_config)
         saved_data = data_collector.get_saved_data()
 
-        # 若采集器携带实时相机内参，则覆盖默认内参。
+        # 使用采集会话的相机模型；离线复算不读取当前硬件或当前配置。
         collector_intrinsics = getattr(data_collector, 'intrinsics', None)
         if collector_intrinsics is not None:
             collector_intrinsics_np = np.asarray(collector_intrinsics, dtype=np.float64)
@@ -151,6 +142,7 @@ class CalibrationSolver:
 
         print(f"加载了 {len(saved_data)} 个数据点")
 
+        self.sample_indices = []
         robot_poses = []
         camera_poses = []
         corners_2d_list = []
@@ -162,7 +154,7 @@ class CalibrationSolver:
 
         for d_any in saved_data:
             d = cast(Dict[str, Any], d_any)
-            tcp = d['tcp']
+            tcp = validate_transform(d['tcp'], f"TCP frame {d['index']}")
             if self.backend in ('apriltag', 'apriltag_board'):
                 tag_pose = d.get('tag_pose')
                 if tag_pose is None:
@@ -172,6 +164,7 @@ class CalibrationSolver:
                 if camera_pose.shape != (4, 4):
                     print(f"  警告: 帧 {d['index']} tag_pose 维度异常，跳过")
                     continue
+                validate_transform(camera_pose, f"camera frame {d['index']}")
                 corners_2d = np.zeros((0, 2), dtype=np.float32)
                 tag_corners = d.get('tag_corners')
                 if tag_corners is None:
@@ -183,6 +176,9 @@ class CalibrationSolver:
                     tag_ids_arr = np.zeros((0,), dtype=np.int32)
                 else:
                     tag_ids_arr = np.asarray(tag_ids, dtype=np.int32).reshape(-1)
+                if not self.legacy_pose_only:
+                    tag_correspondences(self.target_config, tag_ids_arr, tag_corners_arr,
+                                        self.backend == 'apriltag_board')
             else:
                 corners = d['corners']
 
@@ -194,6 +190,8 @@ class CalibrationSolver:
                 if objp is None:
                     print(f"  警告: 帧 {d['index']} 缺少 checkerboard 点模型，跳过")
                     continue
+                if len(corners_2d) != len(objp) or not np.isfinite(corners_2d).all():
+                    raise ValueError(f"Invalid checkerboard corners in frame {d['index']}")
                 ok, rvec, tvec = cv2.solvePnP(
                     objp,
                     corners_2d,
@@ -207,19 +205,24 @@ class CalibrationSolver:
                     continue
 
                 camera_pose = self._rvec_tvec_to_transform(rvec, tvec)
-                self._save_pnp_debug_data(str(d['index']), objp, corners_2d, camera_pose)
+                validate_transform(camera_pose, f"PnP frame {d['index']}")
                 tag_corners_arr = np.zeros((0, 2), dtype=np.float32)
                 tag_ids_arr = np.zeros((0,), dtype=np.int32)
 
+            self.sample_indices.append(str(d['index']))
             robot_poses.append(tcp)
             camera_poses.append(camera_pose)
             corners_2d_list.append(corners_2d)
             tag_corners_list.append(tag_corners_arr)
             tag_ids_list.append(tag_ids_arr)
             if d['rgb'] is not None:
+                if self.session_metadata is not None and [d['rgb'].shape[1], d['rgb'].shape[0]] != self.session_metadata['image_size']:
+                    raise ValueError(f"Image resolution mismatch in frame {d['index']}")
                 images.append(d['rgb'])
             else:
-                images.append(np.zeros((720, 1280, 3), dtype=np.uint8))
+                if not self.legacy_pose_only:
+                    raise ValueError(f"Missing image in frame {d['index']}")
+                images.append(np.zeros((1, 1, 3), dtype=np.uint8))
 
         if len(robot_poses) < self.min_points_required:
             raise ValueError(
@@ -232,7 +235,8 @@ class CalibrationSolver:
         self,
         robot_poses: List[np.ndarray],
         camera_poses: List[np.ndarray],
-        corners_2d_list: List[np.ndarray]
+        corners_2d_list: List[np.ndarray],
+        save: bool = True,
     ) -> Dict[str, Any]:
         """
         执行标定求解
@@ -271,8 +275,16 @@ class CalibrationSolver:
                 intrinsics=self.intrinsics,
                 initial_X=X_svd,
                 position_weight=float(CALIBRATION_CONFIG.get('spatial_position_weight', 0.5)),
-                rotation_weight=float(CALIBRATION_CONFIG.get('spatial_rotation_weight', 0.5))
+                rotation_weight=float(CALIBRATION_CONFIG.get('spatial_rotation_weight', 0.5)),
+                position_scale_m=float(CALIBRATION_CONFIG['position_scale_m']),
+                rotation_scale_rad=float(CALIBRATION_CONFIG['rotation_scale_rad']),
             )
+            validate_transform(X_opt, 'optimized hand-eye transform')
+            if (not opt_result.success or not np.isfinite(opt_result.fun)
+                    or opt_result.fun > opt_result.initial_fun + max(1e-12, opt_result.initial_fun * 1e-9)):
+                X_opt = X_svd.copy()
+                opt_result.success = False
+                print('优化未通过收敛/代价检查，保留 SVD 初值')
             print("非线性优化完成")
             print(f"  优化是否成功: {opt_result.success}")
             print(f"  最终目标函数值 (误差): {opt_result.fun:.6e}")
@@ -295,10 +307,14 @@ class CalibrationSolver:
         print(f"  位置: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] m")
 
         # 保存结果
-        self._save_result(X_opt, z_scale)
+        if save:
+            self._save_result(X_opt, z_scale, opt_result)
 
         return {
             'X': X_opt,
+            'initial_X': X_svd,
+            'output_path': self.output_path,
+            'diagnostics': self.solver.diagnostics,
             'z_scale': z_scale,
             'optimization_result': opt_result,
             'robot_poses': robot_poses,
@@ -306,10 +322,18 @@ class CalibrationSolver:
             'corners_2d_list': corners_2d_list
         }
 
-    def _save_result(self, X: np.ndarray, z_scale: float) -> None:
+    def _save_result(self, X: np.ndarray, z_scale: float, optimization=None) -> None:
         """保存结果到文件"""
-        results_path = get_results_path(self.mode)
-        os.makedirs(results_path, exist_ok=True)
+        results_path = str(new_run_directory(Path(get_results_path(self.mode)) / 'runs'))
+        self.output_path = results_path
+        write_json(Path(results_path) / 'result.json', {
+            'mode': self.mode, 'backend': self.backend, 'source_session': self.source_session,
+            'session': self.session_metadata, 'legacy_pose_only': self.legacy_pose_only,
+            'target': self.target_config, 'diagnostics': self.solver.diagnostics,
+            'transform': X, 'optimization_accepted': bool(optimization is not None and optimization.success),
+            'position_scale_m': CALIBRATION_CONFIG['position_scale_m'],
+            'rotation_scale_rad': CALIBRATION_CONFIG['rotation_scale_rad'],
+        })
 
         # 保存手眼变换矩阵
         np.savetxt(os.path.join(results_path, 'handeye_transform.txt'), X, delimiter=' ')
@@ -318,7 +342,7 @@ class CalibrationSolver:
         np.savetxt(os.path.join(results_path, 'depth_scale.txt'), np.array([z_scale]), delimiter=' ')
 
         # 保存详细信息
-        with open(os.path.join(results_path, 'calibration_info.txt'), 'w') as f:
+        with open(os.path.join(results_path, 'calibration_info.txt'), 'w', encoding='utf-8') as f:
             f.write(f"Mode: {self.mode}\n")
             f.write(f"Z-scale: {z_scale:.6f}\n")
             f.write(f"\nTransform (4x4):\n")

@@ -10,6 +10,7 @@ import struct
 import time
 import numpy as np
 from typing import Any, Optional, cast
+from calibration.transforms import matrix_to_rotvec, rotvec_to_matrix
 
 
 class URRobot:
@@ -69,66 +70,41 @@ class URRobot:
 
     # ==================== 位姿获取 ====================
 
+    @staticmethod
+    def _recv_exact(sock: socket.socket, size: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < size:
+            chunk = sock.recv(size - len(chunks))
+            if not chunk:
+                raise ConnectionError('UR state stream closed before the frame was complete')
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    @classmethod
+    def _read_packet(cls, sock: socket.socket) -> bytes:
+        header = cls._recv_exact(sock, 4)
+        size = struct.unpack('!i', header)[0]
+        if not 492 <= size <= 4096:
+            raise ValueError(f'Invalid UR realtime message size: {size}')
+        return header + cls._recv_exact(sock, size - 4)
+
     def get_state(self) -> bytes:
-        """获取机械臂状态数据 (legacy, use get_joint_positions or get_tool_pose instead)"""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self.tcp_host_ip, self.tcp_port))
-        sock.settimeout(5.0)
-
-        try:
-            _ = sock.recv(1500)
-            state_data = sock.recv(1500)
-        finally:
-            sock.close()
-
-        return state_data
+        """Read complete length-prefixed messages from the UR realtime stream."""
+        with socket.create_connection((self.tcp_host_ip, self.tcp_port), timeout=5.0) as sock:
+            first = self._read_packet(sock)
+            current = self._read_packet(sock)
+        before = struct.unpack_from('!d', first, 4)[0]
+        after = struct.unpack_from('!d', current, 4)[0]
+        if not np.isfinite([before, after]).all() or after <= before:
+            raise ValueError('UR state timestamps did not advance')
+        return current
 
     def get_joint_positions(self) -> np.ndarray:
-        """
-        获取当前关节角度
-
-        Returns:
-            np.array: 6个关节角度 (弧度)
-        """
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self.tcp_host_ip, self.tcp_port))
-        sock.settimeout(5.0)
-
-        try:
-            _ = sock.recv(1500)
-            state_data = sock.recv(1500)
-            joints = self._parse_state_data(state_data, 'joint_data')
-        finally:
-            sock.close()
-
-        return joints
+        return self._parse_state_data(self.get_state(), 'joint_data')
 
     def get_tool_pose(self) -> np.ndarray:
-        """
-        获取当前末端位姿 (TCP)
-
-        Returns:
-            np.array: [x, y, z, rx, ry, rz] (位置: 米, 旋转向量: 弧度)
-        """
-        # For each call, we need to send a command and get response
-        # Because UR3 realtime interface expects us to be in a "receive loop"
-        # But we use request-response pattern
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self.tcp_host_ip, self.tcp_port))
-        sock.settimeout(5.0)
-
-        try:
-            # Receive initial data (skip)
-            _ = sock.recv(1500)
-
-            # Receive actual state data
-            state_data = sock.recv(1500)
-            pose = self._parse_state_data(state_data, 'cartesian_info')
-        finally:
-            sock.close()
-
-        return pose
+        """Return actual TCP [m, m, m, rad, rad, rad]."""
+        return self._parse_state_data(self.get_state(), 'cartesian_info')
 
     def get_transform_matrix(self) -> np.ndarray:
         """
@@ -267,33 +243,15 @@ class URRobot:
         Returns:
             np.array: 解析后的数据
         """
-        fmt_map: dict[str, str] = {
-            'MessageSize': 'i', 'Time': 'd', 'q target': '6d', 'qd target': '6d', 'qdd target': '6d',
-            'I target': '6d', 'M target': '6d', 'q actual': '6d', 'qd actual': '6d',
-            'I actual': '6d', 'I control': '6d', 'Tool vector actual': '6d', 'TCP speed actual': '6d',
-            'TCP force': '6d', 'Tool vector target': '6d', 'TCP speed target': '6d',
-            'Digital input bits': 'd', 'Motor temperatures': '6d', 'Controller Timer': 'd',
-            'Test value': 'd', 'Robot Mode': 'd', 'Joint Modes': '6d', 'Safety Mode': 'd',
-            'empty1': '6d', 'Tool Accelerometer values': '3d', 'empty2': '6d',
-            'Speed scaling': 'd', 'Linear momentum norm': 'd', 'SoftwareOnly': 'd',
-            'softwareOnly2': 'd', 'V main': 'd', 'V robot': 'd', 'I robot': 'd',
-            'V actual': '6d', 'Digital outputs': 'd', 'Program state': 'd',
-            'Elbow position': 'd', 'Elbow velocity': '3d'
-        }
-        parsed: dict[str, tuple[Any, ...]] = {}
-
-        pos = 0
-        for key, fmt in fmt_map.items():
-            fmtsize = struct.calcsize(fmt)
-            data_chunk, data = data[:fmtsize], data[fmtsize:]
-            parsed[key] = struct.unpack("!" + fmt, data_chunk)
-
-        if subpackage == 'joint_data':
-            return np.array(parsed['q actual'], dtype=np.float64)
-        elif subpackage == 'cartesian_info':
-            return np.array(parsed['Tool vector actual'], dtype=np.float64)
-        else:
-            raise ValueError(f"Unknown subpackage: {subpackage}")
+        offsets = {'joint_data': 252, 'cartesian_info': 444}
+        if subpackage not in offsets:
+            raise ValueError(f'Unknown subpackage: {subpackage}')
+        if len(data) < 492 or struct.unpack_from('!i', data)[0] != len(data):
+            raise ValueError('Incomplete or misaligned UR realtime packet')
+        values = np.asarray(struct.unpack_from('!6d', data, offsets[subpackage]))
+        if not np.isfinite(values).all():
+            raise ValueError(f'Non-finite UR state: {subpackage}')
+        return values
 
     def _wait_for_joint(self, target_joints: np.ndarray, timeout: float = 30) -> None:
         """等待关节运动到目标位置"""
@@ -374,25 +332,12 @@ class URRobot:
     @staticmethod
     def R_to_rotvec(R: np.ndarray) -> np.ndarray:
         """旋转矩阵转旋转向量"""
-        theta = np.arccos((np.trace(R) - 1) / 2)
-        if np.abs(theta) < 1e-6:
-            return np.zeros(3)
-        rx = (R[2, 1] - R[1, 2]) / (2 * np.sin(theta))
-        ry = (R[0, 2] - R[2, 0]) / (2 * np.sin(theta))
-        rz = (R[1, 0] - R[0, 1]) / (2 * np.sin(theta))
-        return np.asarray(np.array([rx, ry, rz], dtype=np.float64) * theta, dtype=np.float64)
+        return matrix_to_rotvec(R)
 
     @staticmethod
     def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
         """旋转向量转旋转矩阵 (Rodrigues formula)"""
-        theta = np.linalg.norm(rotvec)
-        if theta < 1e-6:
-            return np.eye(3)
-        k = rotvec / theta  # 旋转轴
-        K = np.array([[0, -k[2], k[1]],
-                      [k[2], 0, -k[0]],
-                      [-k[1], k[0], 0]])
-        return np.asarray(np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K), dtype=np.float64)
+        return rotvec_to_matrix(rotvec)
 
     @staticmethod
     def pose_to_transform(pose: np.ndarray) -> np.ndarray:

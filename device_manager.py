@@ -74,7 +74,9 @@ class DeviceManager:
         if connect_camera:
             print("\n[2/2] 连接 RealSense D405 相机 ...")
             try:
-                self.camera = RealSenseCamera()
+                self.camera = RealSenseCamera(
+                    width=int(REALSENSE_CONFIG['width']), height=int(REALSENSE_CONFIG['height']),
+                    fps=int(REALSENSE_CONFIG['fps']), device_id=REALSENSE_CONFIG['device_id'])
                 self.camera.connect()
                 intrinsics = self.camera.intrinsics
                 if intrinsics is not None:

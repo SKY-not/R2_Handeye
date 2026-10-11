@@ -1,5 +1,5 @@
 # Python version
-python==3.10.20
+# Python 3.10+ (install the interpreter separately)
 
 # Core dependencies
 numpy==2.2.6
