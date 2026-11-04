@@ -1,0 +1,9 @@
+{
+  "robot_config": "configs/robots/ur3_lab.json",
+  "camera_config": "configs/cameras/d405_lab.json",
+  "target_config": "configs/targets/four_apriltag.json",
+  "detection_config": "configs/detection.json",
+  "detection_profile": "apriltag_board",
+  "capture_max_translation_m": 0.0005,
+  "capture_max_rotation_rad": 0.0017
+}

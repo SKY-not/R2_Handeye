@@ -1,0 +1,15 @@
+{
+  "checkerboard": {},
+  "apriltag_board": {
+    "decision_margin_threshold": 20,
+    "min_area_ratio": 0.0005,
+    "max_reprojection_error_px": 2,
+    "min_visible_tags": 2
+  },
+  "apriltag_single": {
+    "decision_margin_threshold": 20,
+    "min_area_ratio": 0.0,
+    "min_visible_tags": 1,
+    "max_reprojection_error_px": null
+  }
+}

@@ -1,139 +1,213 @@
 # R2 Hand-Eye Calibration
 
-UR3 与 RealSense 的手眼标定工具，支持棋盘格、单 AprilTag 和多 AprilTag 刚性板。
-提供实时采集、离线复算、空间一致性和重投影评价。标定模式为眼在手上与眼在手外。
+采集机器人与相机数据，完成手眼标定、静态观测一致性分析和标定结果评价。目前提供 UR 与 RealSense 驱动。
 
-## 运行
+## Part 1：快速开始
 
-使用 Python 3.10+，安装 `requirements.txt` 中的依赖后，在项目根目录运行：
+### 环境配置
+
+在项目根目录执行；硬件依赖需在实际采集机器上安装。
 
 ```powershell
-python main.py
+conda create -n r2-handeye python=3.12 -y
+conda activate r2-handeye
+python -m pip install -r requirements.txt
 ```
 
-依次选择手眼模式、标定板类型，以及新采集或离线复算。
-离线复算不连接机器人和相机，也不要求安装 RealSense SDK 或 AprilTag 检测器；
-仍需 NumPy、SciPy、OpenCV 和 Matplotlib。
+纯离线计算使用 NumPy、SciPy、OpenCV、Matplotlib，不初始化相机或机器人。此次重构未重新安装依赖。
 
-采集按键：空格检测并记录图像/TCP 快照，Enter 保存该快照，Esc 结束。
-必须在机器人静止时采集。采集前后 TCP 变化超过 0.5 mm 或 0.1° 时拒绝样本，
-阈值位于 `CALIBRATION_CONFIG`。这是静止采集检查，不是硬件同步。
+### 项目运行
 
-## 坐标与单位
+全部使用命令行参数，不设终端选择菜单。先检查所选工作流配置引用的设备和标定板文件。
 
-`T_A_B` 将 B 系坐标转换到 A 系。平移单位米，内部旋转向量单位弧度。
-粗略参考位姿配置的旋转向量沿用角度输入，`tag_rotvecs` 则使用弧度。
-TCP 指机器人当前配置的实际 TCP，不应直接等同于法兰；采集期间不得更改 TCP 设置。
+```powershell
+python -m scripts.collect --mode eye_to_hand --config configs/capture.json
+```
 
-| 模式 | 手眼结果 X | 应固定的目标位姿 |
-|---|---|---|
-| `eye_on_hand` | `T_tcp_camera` | `T_base_tcp @ X @ T_camera_target` |
-| `eye_to_hand` | `T_base_camera` | `inverse(T_base_tcp) @ X @ T_camera_target` |
+眼在手上改为 `--mode eye_on_hand`。机器人静止后，Space 检测并记录图像和机器人状态快照，Enter 保存该快照，Esc 结束。新采集继续要求实际 TCP 六维偏置全零；程序读取核验，不修改控制器 TCP。
 
-## 模块职责
+将下面的示例路径替换为采集输出的实际目录：
 
-| 模块 | 职责 |
+```powershell
+$data = "data/eye_to_hand/20261104_143025"
+python -m scripts.calibrate --data "$data" --solver-config configs/solver.json
+```
+
+标定完成后自动计算误差并保存图表；增加 `--visualize` 才显示图表窗口。参考位姿默认不参与评价，需要时明确指定：
+
+```powershell
+python -m scripts.calibrate --data "$data" --reference-config configs/references/lab_board_mount.json
+```
+
+静态观测分析不需要机器人或手眼结果。保持相机和标定板相对固定，Enter 保存一次观测，Space 或 Esc 结束采集并分析。至少保存两帧；不足时原始数据仍保留。
+
+```powershell
+python -m scripts.analyze observation --capture --config configs/observation.json
+python -m scripts.analyze observation --data data/observation/20261104_150000
+```
+
+手眼结果分析复用已求出的矩阵，不重新求解；默认使用该结果记录的原标定数据。指定另一批数据时，使用该批数据评价空间一致性和重投影误差。
+
+```powershell
+$result = "outputs/eye_to_hand/20261104_144000"
+python -m scripts.analyze calibration --result "$result"
+python -m scripts.analyze calibration --result "$result" --data data/eye_to_hand/20261104_160000
+```
+
+独立矩阵文件没有来源信息，必须同时指定 `--data` 和 `--mode`。两个分析模式均支持 `--visualize`、`--visualization-config` 和 `--output-root`；观测分析的 `--config` 仅用于新采集。
+
+运动验证沿用 UR RTDE 和单 Tag 流程，先试算：
+
+```powershell
+python -m scripts.move_tcp --result "$result" --config configs/motion.json --dry-run
+```
+
+`--dry-run` 不发送运动指令；眼在手上仍需读取机器人当前位姿。去掉该参数且配置中 `dry_run` 为 `false` 时，Enter 锁定目标并发送运动，c 清除显示中的锁定目标，Esc 退出程序。退出或清除显示不等同于机器人停止命令。到位指标比较机器人回报的 TCP 与计算目标，不能作为独立绝对精度证明。
+
+无硬件回归测试：
+
+```powershell
+python -B -m unittest discover -s tests -p "test_*.py" -v
+```
+
+## Part 2：输入与输出
+
+### Input：配置读取关系
+
+所有相对路径均相对项目根目录。修改设备参数只改被引用的设备文件，不在工作流中重复填写。
+
+| 操作 | 读取配置与数据 |
 |---|---|
-| `main.py` | 交互、会话选择和评价流程；设备始终在 finally 中释放 |
-| `data_collector.py` | 静止采集快照、检测预览和样本保存/读取 |
-| `calibration/session.py` | 会话清单、独立运行目录、原子 JSON 写入 |
-| `calibration/targets.py` | 棋盘格/Tag 几何、固定角点顺序、多标签联合 PnP |
-| `calibration/transforms.py` | 刚体变换检查、稳定旋转转换、旋转均值和固定系目标位姿 |
-| `calibration/solver_axxb.py` | 运动退化检查、AX=XB 的 SVD 初值 |
-| `calibration/optimizer.py` | 无量纲、向量化的最小二乘优化及接受检查 |
-| `calibration_solver.py` | 数据加载、求解编排和结果保存 |
-| `camera/model.py` | 相机模型检查、按分辨率缓存去畸变映射 |
-| `error_calculator.py` | 空间一致性、参考偏差、固定对应关系的重投影评价 |
+| `collect` | `capture.json` → 所引用的机器人、相机、标定板和检测配置 |
+| `calibrate` | 已保存的数据及采集信息＋`solver.json`＋绘图配置；可选参考配置 |
+| `analyze observation --capture` | `observation.json` → 相机、标定板、检测配置；分析时读取绘图配置 |
+| `analyze observation --data` | 已保存的观测数据＋绘图配置，不读取当前设备或检测配置 |
+| `analyze calibration` | 指定结果和数据＋绘图配置；可选参考配置，不读取求解或设备配置 |
+| `move_tcp` | `motion.json` → 机器人、相机、单 Tag 和检测配置；指定手眼结果、绘图配置 |
 
-旋转运算统一使用 SciPy Rotation，避免 180° 奇异问题。
-SVD 使用精简矩阵分解，相对位姿逆矩阵预先计算；优化批量计算残差。
-离线加载不读取未参与求解的深度数组。去畸变映射只在尺寸变化时重建。
+| 文件 | 参数职责 |
+|---|---|
+| `configs/robots/ur3_lab.json` | 驱动、IP、通信与只读状态端口、工作空间及驱动默认关节速度/加速度 |
+| `configs/cameras/d405_lab.json` | 驱动、序列号、分辨率、帧率、`enable_depth`；RealSense 内参来自设备 |
+| `configs/targets/*.json` | 板类型、实际尺寸、Tag ID、布局及旋转；不含安装参考位姿 |
+| `configs/detection.json` | `checkerboard`、`apriltag_board`、`apriltag_single` 检测配置组 |
+| `configs/capture.json` | 设备、板及检测配置引用；采图前后机器人静止阈值 |
+| `configs/observation.json` | 相机、板及检测配置引用；两次保存的最短间隔（秒） |
+| `configs/motion.json` | 配置引用、目标 TCP 相对 Tag 的位姿、运动速度/加速度、到位阈值 |
+| `configs/solver.json` | 最少样本、最小二乘、位置/旋转权重与归一化尺度 |
+| `configs/references/lab_board_mount.json` | 按目标类型记录参考位姿、单位、TCP 定义及测量来源 |
+| `configs/visualization.json` | 图表尺寸与运动预览坐标轴长度 |
 
-## 标定板与相机配置
+机器人配置的 `default_velocity/default_acceleration` 作用于 UR 驱动的关节运动默认值；`move_tcp` 使用 `motion.json` 的 `rtde_velocity/rtde_acceleration`（rad/s、rad/s²）。采集不会主动运动机器人。工作空间参数供 UR 驱动工作空间查询使用，不代表 RTDE 路径规划限制。
 
-棋盘格的 `size` 表示内角点列数和行数，`square_size` 为实测格长。
-单 AprilTag 使用 `pyapriltags` 的位姿估计，并检查正深度及有序角点重投影误差。
-标签尺寸是检测角点之间的边长，不包括外围留白。
+换棋盘格或另一块 Tag 板时，修改工作流的 `target_config` 和匹配的 `detection_profile`。静态观测支持棋盘格、整板和单 Tag；手眼采集保留棋盘格与整板，运动验证目前使用单 Tag。
 
-多标签板由 `tag_ids`、`tag_centers`、`tag_rotvecs` 描述。
-每个标签的中心及旋转均相对于板坐标系；旋转向量由解码后的 Tag 坐标系变换到板坐标系。
-默认所有标签同向，若实际旋转了标签，必须填写相应旋转。
-所有可见角点联合求板位姿，不再按解码置信度平均独立位姿。
-默认至少可见两个标签，每个标签平均重投影误差不超过 2 px；可在配置中调整。
-任一标签几何不一致、重复 ID 或角点数据异常时拒绝该帧。
+采集会保存实际内参、图像尺寸、板几何和检测设置。离线处理以保存内容为准，不因修改当前配置而改变历史数据解释，也不自动重新检测图像。`null` 表示未提供；例如参考位姿为 `null` 时跳过对应比较。
 
-单标签与棋盘格的粗略参考位姿分别配置，不再交叉引用。
-没有独立参考时设为 `None`，仅评价空间一致性。
+位姿统一约定为 `T_A_B`：将 B 系坐标转换到 A 系。平移使用米，内部旋转向量使用弧度，不是欧拉角；参考文件明确声明 m/mm、deg/rad，按声明转换。
 
-相机宽高、帧率、设备 ID 显式传入驱动；会话记录实际启用的分辨率和序列号。
-非零的 inverse/modified Brown-Conrady 等模型不会直接当作 OpenCV 畸变使用，
-遇到不兼容模型会明确报错。当前实机模型需要连接相机后确认。
+| 标定模式 | 输入机器人位姿 | 输出手眼矩阵 | 板应固定在哪个坐标系 |
+|---|---|---|---|
+| `eye_to_hand` | `T_base_tcp` | `T_base_camera` | TCP |
+| `eye_on_hand` | `T_base_tcp` | `T_tcp_camera` | 基座 |
 
-## 会话与结果
+新采集 TCP 偏置为零，因此 TCP 与法兰重合。固定安装和 TCP 定义必须与待评价结果相符；程序无法仅凭文件证明安装未改变。
 
-新采集保存在 `data/{mode}/sessions/{id}/`，不会删除历史数据。
+### Output：目录与文件
 
 ```text
-session.json            # 模式、板几何、K/D、相机标识、图像尺寸、角点坐标系
-poses/tcp_001.txt        # 取图时记录的实际 TCP
-poses/tag_pose_001.txt   # 或棋盘格 corners_001.txt
-poses/tag_corners_001.txt
-poses/tag_ids_001.txt
-poses/frame_001.json     # 最后写入的完成标记、取图时间、采集耗时
-images/rgb_001.png       # 原始图像
-images/depth_001.npy     # 深度存档，不参与当前手眼求解
+data/
+├── eye_to_hand/<data_id>/
+├── eye_on_hand/<data_id>/
+└── observation/<data_id>/
+    ├── session.json
+    └── frames/000001/
+        ├── image.png
+        ├── depth.npy          # 可选：有深度才保存，单位 m
+        ├── robot.json         # 仅手眼数据：位姿、前后状态、TCP 偏置
+        ├── observation.json   # 位姿、2D/3D 对应点、投影模型、质量
+        └── frame.json         # 时间、文件关联及完成标记
+
+outputs/
+├── eye_to_hand/<calibration_id>/
+│   ├── result.json
+│   ├── handeye_transform.txt
+│   ├── evaluation.json
+│   ├── residuals.csv
+│   └── figures/
+├── eye_on_hand/<calibration_id>/
+├── analysis/<analysis_id>/
+│   ├── run.json
+│   ├── analysis.json
+│   ├── evaluation.json
+│   ├── residuals.csv
+│   └── figures/
+└── motion_validation/<motion_id>/
+    ├── run.json
+    ├── camera.json
+    └── events.json
 ```
 
-棋盘格角点属于原图；AprilTag 角点属于 alpha=0、相同输出尺寸的去畸变图。
-采集、保存和报告使用相同的坐标约定。写入中断而没有完成标记的样本不会加载。
-离线复算使用会话记录的参数；修改 `config.py` 不会改变历史样本的含义。
-不要直接编辑历史会话的几何或内参来复算已保存的 Tag 位姿；应重新采集或重新检测原图。
+三个数据类别使用相同帧目录结构，观测数据没有机器人文件。原图可以是彩色或灰度，检测绘制内容不覆盖原图。RealSense 深度可关闭；开启时对齐到彩色图并换算为米，**当前手眼算法不使用深度修正**。
 
-旧数据没有 `session.json` 时，AprilTag 允许显式选择“历史位姿一致性”模式，
-不报告无法追溯的重投影误差，不允许追加采集。旧棋盘格数据请重新采集为完整会话。
+每次采集、求解和独立分析新建目录，以本机时间命名，同秒重名增加序号；不覆盖旧文件。帧完成标记最后写入，不完整帧不参与读取。`--data-root` 指定数据分类目录的父目录；`--output-root` 指定本次新结果目录的父目录。
 
-每次求解保存在 `results/{mode}/runs/{id}/`：
+`calibrate` 的附带评价保存在本次标定目录，显式 `analyze` 保存在新的分析目录。两者共用同一手眼评价函数，相同矩阵、数据和评价设置应得到相同指标。报告使用 mm、deg、px；逐帧数据见 CSV。图表保存位置/旋转残差、分量及重投影曲线。
 
-- `handeye_transform.txt`：手眼矩阵。
-- `calibration_info.txt`、`depth_scale.txt`：保留文本格式；scale 固定为 1。
-- `result.json`：来源会话、板配置、求解诊断及优化是否被接受。
-- `residuals.csv`：按原始帧编号对齐的一致性和全链路重投影误差。
+JSON 保留必要的来源路径、配置和格式版本，不计算文件哈希；短数组单行，矩阵逐行。来源文件关联依靠路径，请保留原始数据；矩阵仍与同目录 `result.json` 中的值核对。
 
-历史根目录下的结果文件保留，不自动覆盖。实际验证时显式指定本次结果，例如：
+旧版 `session.json`＋`poses/images` 会话可直接读取，不迁移或改写。旧静态验证 CSV 可传给 `analyze observation --data`，其重投影只能使用已有列值，因为 CSV 没有完整原始角点。
+
+缺少会话信息的旧整板位姿数据可显式导入，只评价位姿一致性：
 
 ```powershell
-python tests/test_eye_to_hand_tag36h11_id0_pose_consistency.py --handeye-file results/eye_to_hand/runs/<id>/handeye_transform.txt --csv tests/new_consistency.csv
-python tests/analyze_base_tag_from_calibration.py --calibration-info results/eye_to_hand/runs/<id>/calibration_info.txt --csv tests/new_consistency.csv --output tests/new_base_analysis.png
+python -m scripts.calibrate --data data/old_poses --legacy-poses --mode eye_to_hand --backend four_apriltag
 ```
 
-运动验证脚本 `tests/move_tcp_eye_to_hand_apriltag.py` 也支持 `--handeye-file`。
-该脚本会发送机器人运动指令；初次验证使用其 `--dry-run` 参数。
+## Part 3：算法流程
 
-## 优化与误差解释
-
-仅有平移或几乎绕单轴转动的样本会被拒绝；建议采集至少 15–25 个覆盖不同旋转轴、
-图像区域和距离的静止姿态。最低数量仍为 6 帧，数量足够不代表约束足够。
-
-优化残差按位置尺度 1 mm、旋转尺度 1° 归一化，再应用位置/旋转权重。
-这两个尺度是可配置的工程权重，并非测得的相机噪声。
-最小二乘未收敛、输出非有限值或同一目标函数变差时，保留 SVD 初值。
-界面同时显示 SVD 与最终结果的位置/旋转均值；位置改善可能伴随旋转误差上升。
-
-- 空间一致性和全链路重投影为同批标定样本的拟合指标，不是独立绝对精度。
-- 相对手工粗略位姿的偏差包含参考值自身的误差，单独标注。
-- AprilTag 重投影按固定 ID 和角点顺序计算，不允许重排角点来降低误差。
-- 空评价显示 N/A，不再显示零误差。
-- 静态 Tag 重复测量衡量视觉稳定性；相对平均位姿的残差会抵消固定手眼矩阵，不能验证该矩阵的准确度。
-- `analyze_base_tag_from_calibration.py` 的平移分量现在在基座系计算，Base-Z 名称与计算一致；旋转残差仍相对平均 Tag 姿态。
-
-手眼验证应补采未参与求解的机器人姿态，检查固定目标的一致性；绝对精度还需要独立测量参考。
-
-## 自动化验证
-
-```powershell
-python -B -m unittest discover -s tests -p test_calibration_core.py -v
+```text
+collect：图像＋采图前后机器人状态 → 零 TCP/静止检查 → 板检测 → 保存数据
+calibrate：读取配对位姿 → 运动约束检查 → SVD 初值 → 非线性最小二乘 → 共用评价
+analyze observation：静态采集或读取 → 相机系位姿相对均值的波动＋观测重投影
+analyze calibration：读取矩阵及配对数据 → 共用评价（不重新求解）
 ```
 
-覆盖两种手眼模式、旋转奇异角、退化运动、优化回退、TCP 拆包/粘包、快照匹配、
-采集中运动、写入失败、历史数据保护、板上标签旋转、错误角点对应、相机模型及完整离线流程。
-这些测试不连接机器人，不代替 RealSense 与 UR 实机验收。
+保留原有求解算法和默认数值：至少 6 帧，优化使用位置/旋转归一化残差，优化失败或变差时保留 SVD。棋盘格使用原图角点；整板使用 alpha=0 去畸变角点并联合 PnP；单 Tag 观测与运动验证沿用 alpha=1 去畸变与 Tag 位姿估计。新数据保存对应投影模型，读取时检查一致性。
+
+| 指标 | 含义 |
+|---|---|
+| 静态观测重复性 | 相机系位置波动及相对平均姿态的旋转波动，不证明手眼精度 |
+| 空间一致性 | 经手眼链路计算的板位姿相对平均位姿的离散 |
+| 观测重投影 | 视觉位姿预测的角点与检测角点之差 |
+| 全链路重投影 | 机器人、手眼矩阵和该批数据的平均板位姿共同预测的角点偏差 |
+| 参考位姿偏差 | 与显式提供的参考比较，包含参考测量自身误差 |
+
+原标定数据报告为拟合评价；另采数据报告为另一数据集的一致性评价。两者的全链路重投影均使用本批数据估计平均板位姿，不等同于有外部真值的独立绝对精度测试。
+
+## Part 4：工程结构
+
+```text
+configs/               # 工作流配置及 robots/cameras/targets/references
+scripts/               # collect、calibrate、analyze、move_tcp 四个命令入口
+handeye/
+├── robot/             # 状态接口、UR 驱动、独立 RTDE 运动能力
+├── camera/            # 相机接口、RealSense 驱动及畸变模型
+├── targets/           # 板几何和共用检测器
+├── calibration/       # 坐标变换、SVD、优化；保留旧几何导入兼容
+├── analysis/          # observation、calibration 与共用报告输出
+├── config.py          # 按需加载配置，解析项目相对路径
+├── session.py         # 独立目录、JSON 与帧读写、结果选择
+├── pipeline.py        # 采集和求解流程
+├── data_collector.py  # 采集快照、静止检查、新旧数据读取
+├── device_manager.py  # 按驱动类型创建设备
+├── calibration_solver.py
+├── error_calculator.py
+├── move_validation.py
+└── result_visualizer.py
+data/                  # 原始输入
+outputs/               # 求解、分析和运动验证结果
+tests/                 # 不连接硬件的回归测试
+```
+
+`validate` 已合并进 `analyze observation`，旧 `analyze --kind base/consistency` 替换为两个明确的子命令。新增设备时实现接口并登记驱动工厂；本次未实现工业相机、法奥机器人或多相机，也未改变手眼求解模型。

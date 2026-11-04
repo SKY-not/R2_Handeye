@@ -1,7 +1,8 @@
 # Ignore collected calibration data (keep directory structure)
-data/
-data/eye*/
-data*/
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
 # Python generated files
 __pycache__/
 *.py[cod]

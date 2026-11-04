@@ -1,0 +1,9 @@
+{
+  "driver": "ur",
+  "tcp_host_ip": "192.168.56.102",
+  "tcp_port": 30003,
+  "state_port": 30012,
+  "workspace_limits": null,
+  "default_velocity": 1.05,
+  "default_acceleration": 1.4
+}

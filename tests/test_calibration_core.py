@@ -2,6 +2,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import struct
 import sys
@@ -15,18 +16,18 @@ from scipy.optimize import OptimizeResult
 from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from calibration.transforms import (average_transforms, invert_transform, matrix_to_rotvec,
+from handeye.calibration.transforms import (average_transforms, invert_transform, matrix_to_rotvec,
                                     pose_to_mat, rotvec_to_matrix, validate_transform)
-from calibration.solver_axxb import HandEyeSolver
-from calibration.optimizer import HandEyeOptimizer
-from calibration.targets import (checkerboard_points, tag_points, tag_correspondences,
+from handeye.calibration.solver_axxb import HandEyeSolver
+from handeye.calibration.optimizer import HandEyeOptimizer
+from handeye.calibration.targets import (checkerboard_points, tag_points, tag_correspondences,
                                  solve_board_pose, target_config)
-from calibration.session import data_paths, read_manifest, write_json
-from calibration_solver import CalibrationSolver
-from camera.model import Rectifier, opencv_distortion
-from data_collector import CalibDataCollector
-from error_calculator import ErrorCalculator
-from robot.ur_robot import URRobot
+from handeye.session import data_paths, read_manifest, write_json
+from handeye.calibration_solver import CalibrationSolver
+from handeye.camera.model import Rectifier, opencv_distortion
+from handeye.data_collector import CalibDataCollector
+from handeye.error_calculator import ErrorCalculator
+from handeye.robot.ur_robot import URRobot
 
 
 def synthetic(mode, count=12):
@@ -98,7 +99,7 @@ class SolverTests(unittest.TestCase):
         X, robot, camera = synthetic('eye_to_hand')
         bad = X.copy(); bad[0, 3] += 123
         for success, cost in [(False, 1.), (True, 100.)]:
-            solver = CalibrationSolver('eye_to_hand', backend='apriltag')
+            solver = CalibrationSolver('eye_to_hand', backend='apriltag_board')
             result = OptimizeResult(success=success, fun=cost, initial_fun=2.)
             with patch.object(solver.optimizer, 'optimize', return_value=(bad, 1., result)), \
                     patch.object(solver, '_save_result') as save, contextlib.redirect_stdout(io.StringIO()):
@@ -134,7 +135,7 @@ class RobotStreamTests(unittest.TestCase):
         expected = [.1, .2, .3, .4, .5, .6]
         for fragment in (1, 7, 1500):
             sock = FragmentedSocket(packet(1., [0]*6) + packet(2., expected), fragment)
-            with patch('robot.ur_robot.socket.create_connection', return_value=sock):
+            with patch('handeye.robot.ur_robot.socket.create_connection', return_value=sock):
                 np.testing.assert_allclose(URRobot().get_tool_pose(), expected)
 
     def test_closed_truncated_and_stale_stream_rejected(self):
@@ -143,7 +144,7 @@ class RobotStreamTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             URRobot._read_packet(FragmentedSocket(struct.pack('!i', -1)))
         sock = FragmentedSocket(packet(1., [0]*6) * 2)
-        with patch('robot.ur_robot.socket.create_connection', return_value=sock), self.assertRaises(ValueError):
+        with patch('handeye.robot.ur_robot.socket.create_connection', return_value=sock), self.assertRaises(ValueError):
             URRobot().get_tool_pose()
 
 
@@ -156,7 +157,7 @@ class TargetTests(unittest.TestCase):
         config['tag_rotvecs'][2] = [0, 0, np.pi / 2]
         expected = pose_to_mat([.01, .02, .4, .3, -.2, .1])
         for ids in (np.array([1, 2, 3, 4]), np.array([2, 4])):
-            points = np.vstack([tag_points(config, int(i), True) for i in ids])
+            points = np.vstack([tag_points(config, int(i)) for i in ids])
             corners, _ = cv2.projectPoints(points, matrix_to_rotvec(expected[:3, :3]), expected[:3, 3], K, np.zeros(5))
             fitted, error = solve_board_pose(config, ids, corners, K)
             np.testing.assert_allclose(fitted, expected, atol=1e-7)
@@ -166,22 +167,22 @@ class TargetTests(unittest.TestCase):
         config = target_config('apriltag_board')
         for ids, count in [([1, 1], 8), ([1, 99], 8), ([1, 2], 7), ([], 0)]:
             with self.assertRaises(ValueError):
-                tag_correspondences(config, ids, np.zeros((count, 2)), True)
+                tag_correspondences(config, ids, np.zeros((count, 2)))
 
     def test_corner_relabel_is_not_hidden(self):
-        config = target_config('apriltag')
-        points = tag_points(config, config['target_tag_id'])
+        config = target_config('apriltag_board')
+        points = tag_points(config, config['tag_ids'][0])
         T = pose_to_mat([0, 0, .4, 0, 0, 0])
         pixels, _ = cv2.projectPoints(points, np.zeros(3), T[:3, 3], K, np.zeros(5))
-        calc = ErrorCalculator('eye_to_hand', K, np.zeros(5), 'apriltag')
+        calc = ErrorCalculator('eye_to_hand', K, np.zeros(5), 'apriltag_board')
         error = calc._apriltag_frame_reprojection_error(T, np.roll(pixels, 1, axis=0),
-                                                       np.array([config['target_tag_id']]), K, np.zeros(5))
+                                                       np.array([config['tag_ids'][0]]), K, np.zeros(5))
         self.assertGreater(error, 10)
 
     def test_inconsistent_board_rejected(self):
         config = target_config('apriltag_board')
         ids = np.array([1, 2, 3, 4])
-        points = np.vstack([tag_points(config, int(i), True) for i in ids])
+        points = np.vstack([tag_points(config, int(i)) for i in ids])
         pixels, _ = cv2.projectPoints(points, np.array([.3, -.2, .1]), np.array([0., 0., .4]), K, np.zeros(5))
         pixels[4:8, 0, 0] += 40
         with self.assertRaises(ValueError):
@@ -197,7 +198,7 @@ class CameraModelTests(unittest.TestCase):
 
     def test_rectification_maps_cached(self):
         rectifier = Rectifier(K, np.zeros(5))
-        with patch('camera.model.cv2.initUndistortRectifyMap', wraps=cv2.initUndistortRectifyMap) as build:
+        with patch('handeye.camera.model.cv2.initUndistortRectifyMap', wraps=cv2.initUndistortRectifyMap) as build:
             rectifier.apply(np.zeros((480, 640), dtype=np.uint8))
             rectifier.apply(np.zeros((480, 640, 3), dtype=np.uint8))
             self.assertEqual(build.call_count, 1)
@@ -218,12 +219,18 @@ class CaptureTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.path_patch = patch('data_collector.get_data_path', return_value=data_paths(self.root))
+        self.path_patch = patch('handeye.data_collector.get_data_path', return_value=data_paths(self.root))
         self.path_patch.start(); self.addCleanup(self.path_patch.stop)
         self.robot = unittest.mock.Mock()
         self.robot.get_transform_matrix.return_value = np.eye(4)
+        self.robot.get_tcp_offset.return_value = np.zeros(6)
+        self.robot.get_calibration_sample.side_effect = lambda: {
+            'transform': self.robot.get_transform_matrix(), 'tcp_offset': np.zeros(6),
+            'source': 'synthetic zero-TCP fixture', 'robot_timestamp_us': None}
         self.collector = CalibDataCollector(self.robot, FakeCamera(), 'eye_to_hand', 'checkerboard')
-        self.collector.extractor.detect_corners = lambda *args, **kwargs: (True, np.zeros((88, 1, 2)), np.zeros((88, 1, 2)))
+        points = checkerboard_points(self.collector.target_config)
+        corners, _ = cv2.projectPoints(points, np.array([.1,.2,.05]), np.array([0.,0.,.5]), K, np.zeros(5))
+        self.collector.extractor.detect_corners = lambda *args, **kwargs: (True, corners, corners)
 
     def test_save_uses_capture_snapshot_and_preserves_previous_sessions(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -231,16 +238,28 @@ class CaptureTests(unittest.TestCase):
             old_root = Path(self.collector.data_path['root'])
             self.robot.get_transform_matrix.return_value = pose_to_mat([.1, 0, 0, 0, 0, 0])
             self.collector.save_frame(frame)
-            saved = np.loadtxt(old_root / 'poses/tcp_001.txt')
+            saved = np.asarray(json.loads((old_root / 'frames/000001/robot.json').read_text())['transform'])
             np.testing.assert_allclose(saved, np.eye(4))
             self.assertEqual(self.robot.get_transform_matrix.call_count, 2)
             self.collector.start_new_session()
-        self.assertTrue((old_root / 'poses/tcp_001.txt').exists())
+        self.assertTrue((old_root / 'frames/000001/robot.json').exists())
         self.assertNotEqual(old_root, Path(self.collector.data_path['root']))
         metadata = read_manifest(old_root)
         self.assertEqual(metadata['camera_id'], 'fake-camera')
+        self.assertTrue(metadata['tcp_definition']['verified'])
+        self.assertEqual(metadata['tcp_definition']['offset_m_rotvec_rad'], [0] * 6)
         loaded = CalibDataCollector.from_session(str(old_root), 'eye_to_hand', 'checkerboard')
         self.assertEqual(len(loaded.get_saved_data()), 1)
+
+    def test_capture_accepts_gray_camera_without_depth(self):
+        self.collector.camera.get_data = lambda: (np.zeros((480,640),dtype=np.uint8), None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            sample=self.collector.capture_and_detect()
+            self.assertTrue(sample['success'])
+            self.collector.save_frame(sample)
+        root=Path(self.collector.data_path['root'])
+        self.assertFalse((root/'frames/000001/depth.npy').exists())
+        self.assertEqual(self.collector.get_saved_data()[0]['rgb'].ndim,2)
 
     def test_motion_during_capture_rejected(self):
         self.robot.get_transform_matrix.side_effect = [np.eye(4), pose_to_mat([.01, 0, 0, 0, 0, 0])]
@@ -248,10 +267,24 @@ class CaptureTests(unittest.TestCase):
             frame = self.collector.capture_and_detect()
         self.assertFalse(frame['success'])
 
+    def test_nonzero_tcp_cannot_start_collection(self):
+        self.robot.get_tcp_offset.return_value = np.array([0, 0, .1, 0, 0, 0])
+        with self.assertRaisesRegex(ValueError, 'Calibration requires TCP offset'):
+            self.collector.start_new_session()
+        self.assertFalse(list(self.root.rglob('session.json')))
+
+    def test_tcp_offset_change_during_capture_is_rejected(self):
+        self.robot.get_calibration_sample.side_effect = [
+            {'transform': np.eye(4), 'tcp_offset': np.zeros(6)},
+            {'transform': np.eye(4), 'tcp_offset': np.array([0, 0, 0, .1, 0, 0])}]
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(ValueError):
+            self.collector.capture_and_detect()
+        self.assertEqual(self.collector.get_saved_data(), [])
+
     def test_failed_image_write_never_commits_frame(self):
         with contextlib.redirect_stdout(io.StringIO()):
             frame = self.collector.capture_and_detect()
-            with patch('data_collector.cv2.imwrite', return_value=False), self.assertRaises(OSError):
+            with patch('handeye.data_collector.cv2.imwrite', return_value=False), self.assertRaises(OSError):
                 self.collector.save_frame(frame)
         self.assertEqual(self.collector.get_saved_data(), [])
 
@@ -259,7 +292,7 @@ class CaptureTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.collector.start_new_session()
         with self.assertRaises(ValueError):
-            CalibDataCollector.from_session(self.collector.data_path['root'], 'eye_to_hand', 'apriltag')
+            CalibDataCollector.from_session(self.collector.data_path['root'], 'eye_to_hand', 'apriltag_board')
         self.collector.camera = FakeCamera()
         self.collector.camera.intrinsics = K * 2
         with self.assertRaises(ValueError):
@@ -267,45 +300,23 @@ class CaptureTests(unittest.TestCase):
 
     def test_legacy_requires_explicit_opt_in(self):
         with self.assertRaises(ValueError):
-            CalibDataCollector.from_session(str(self.root), 'eye_to_hand', 'apriltag')
+            CalibDataCollector.from_session(str(self.root), 'eye_to_hand', 'apriltag_board')
 
 
 class EvaluationTests(unittest.TestCase):
     def test_recorded_board_session_offline_pipeline(self):
         """Reload JSON geometry, solve, save an isolated run, and render its CSV report."""
-        import main
+        from handeye import pipeline as main
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'poses').mkdir(); (root / 'images').mkdir()
-            config = target_config('apriltag_board')
-            config['tag_rotvecs'][2] = [0, 0, np.pi / 2]
-            metadata = {'schema_version': 1, 'mode': 'eye_to_hand', 'backend': 'apriltag_board',
-                        'corner_space': 'rectified_alpha0', 'camera_matrix': K, 'dist_coeffs': np.zeros(5),
-                        'camera_id': 'synthetic', 'image_size': [640, 480], 'target': config}
-            write_json(root / 'session.json', metadata)
-            ids = np.array([1, 2, 3, 4])
-            points = np.vstack([tag_points(config, int(i), True) for i in ids])
-            rectified_K = Rectifier(K, np.zeros(5)).prepare((640, 480))
-            X = pose_to_mat([.2, -.1, .3, .2, -.4, .1])
-            Y = pose_to_mat([.01, .02, .03, .1, 0, 0])
-            rng = np.random.default_rng(7)
-            for i in range(8):
-                C = pose_to_mat(np.r_[rng.uniform(-.02, .02, 2), .4 + rng.uniform(-.03, .03),
-                                      rng.uniform(-.4, .4, 3)])
-                G = X @ C @ invert_transform(Y)
-                pixels, _ = cv2.projectPoints(points, matrix_to_rotvec(C[:3, :3]), C[:3, 3], rectified_K, np.zeros(5))
-                index = f'{i + 1:03d}'
-                for prefix, data in [('tcp', G), ('tag_pose', C), ('tag_corners', pixels.reshape(-1, 2)), ('tag_ids', ids)]:
-                    np.savetxt(root / 'poses' / f'{prefix}_{index}.txt', data,
-                               fmt='%d' if prefix == 'tag_ids' else '%.18e')
-                cv2.imwrite(str(root / 'images' / f'rgb_{index}.png'), np.zeros((480, 640, 3), dtype=np.uint8))
-                write_json(root / 'poses' / f'frame_{index}.json', {'captured_at_ns': i})
+            from tests.fixtures import write_session
+            X = write_session(root)
             collector = CalibDataCollector.from_session(str(root), 'eye_to_hand', 'apriltag_board')
             solver = CalibrationSolver('eye_to_hand', K, np.zeros(5), 'apriltag_board')
             results = root / 'results'; results.mkdir()
             archived = results / 'handeye_transform.txt'; archived.write_text('preserve me')
             with contextlib.redirect_stdout(io.StringIO()), \
-                    patch('calibration_solver.get_results_path', return_value=str(results)), \
+                    patch('handeye.calibration_solver.get_results_path', return_value=str(results)), \
                     patch('builtins.input', return_value='n'):
                 robot, camera, corners, images, tc, ti = solver.load_data(collector)
                 result = solver.solve(robot, camera, corners)
@@ -318,7 +329,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_eye_to_hand_reference_free_errors_use_tcp_frame(self):
         X, robot, camera = synthetic('eye_to_hand')
-        calc = ErrorCalculator('eye_to_hand', K, np.zeros(5), 'apriltag')
+        calc = ErrorCalculator('eye_to_hand', K, np.zeros(5), 'apriltag_board')
         np.testing.assert_allclose(calc.calculate_position_error(robot, camera, X), 0, atol=1e-12)
         np.testing.assert_allclose(calc.calculate_rotation_error(robot, camera, X), 0, atol=1e-12)
 
@@ -329,12 +340,10 @@ class EvaluationTests(unittest.TestCase):
             return invert_transform(average_transforms(values)) @ values
         np.testing.assert_allclose(residuals(X), residuals(np.eye(4)), atol=1e-12)
 
-    def test_base_z_analysis_uses_base_axes(self):
-        path = Path(__file__).with_name('analyze_base_tag_from_calibration.py')
-        spec = importlib.util.spec_from_file_location('base_analysis', path)
-        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    def test_observation_z_analysis_uses_camera_axes(self):
+        from handeye.analysis import observation as module
         poses = np.stack([pose_to_mat([0, 0, z, 0, np.pi / 2, 0]) for z in (.1, .102)])
-        _, translation, _ = module.analyze(poses)
+        _, translation, _ = module.observation_residuals(poses)
         np.testing.assert_allclose(translation[:, 2], [-1, 1], atol=1e-10)
         np.testing.assert_allclose(translation[:, 0], [0, 0], atol=1e-10)
 

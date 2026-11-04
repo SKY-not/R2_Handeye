@@ -1,0 +1,13 @@
+{
+  "robot_config": "configs/robots/ur3_lab.json",
+  "camera_config": "configs/cameras/d405_lab.json",
+  "target_config": "configs/targets/single_apriltag.json",
+  "detection_config": "configs/detection.json",
+  "detection_profile": "apriltag_single",
+  "t_tag_tcp_target": [0, -0.5, 0, 0, 3.141592653589793, 0],
+  "rtde_velocity": 0.05,
+  "rtde_acceleration": 0.05,
+  "dry_run": false,
+  "pos_arrival_threshold_m": 0.002,
+  "rot_arrival_threshold_rad": 0.02
+}
