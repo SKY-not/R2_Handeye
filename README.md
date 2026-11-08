@@ -33,7 +33,7 @@ $data = "data/eye_to_hand/20261104_143025"
 python -m scripts.calibrate --data "$data" --solver-config configs/solver.json
 ```
 
-标定完成后自动计算误差并保存图表；增加 `--visualize` 才显示图表窗口。参考位姿默认不参与评价，需要时明确指定：
+标定完成后自动计算误差并保存图表；增加 `--visualize` 才显示图表窗口。`calibrate` 与 `analyze calibration` 共用评价入口，默认读取 `configs/references/lab_board_mount.json`；可用 `--reference-config` 指定其他参考配置：
 
 ```powershell
 python -m scripts.calibrate --data "$data" --reference-config configs/references/lab_board_mount.json
@@ -102,6 +102,8 @@ python -B -m unittest discover -s tests -p "test_*.py" -v
 
 换棋盘格或另一块 Tag 板时，修改工作流的 `target_config` 和匹配的 `detection_profile`。静态观测支持棋盘格、整板和单 Tag；手眼采集保留棋盘格与整板，运动验证目前使用单 Tag。
 
+D405 彩色流的非零 inverse_brown_conrady 在相机驱动中按 RealSense SDK 模型校正；彩色图和已对齐深度使用同一映射，深度单位仍为 m。输出图像及保存的 image.png 对应校正后内参与零畸变，设备原始模型、系数和内参另存于 session.json 的 source_camera_model。其他已支持模型保持原有处理。
+
 采集会保存实际内参、图像尺寸、板几何和检测设置。离线处理以保存内容为准，不因修改当前配置而改变历史数据解释，也不自动重新检测图像。`null` 表示未提供；例如参考位姿为 `null` 时跳过对应比较。
 
 位姿统一约定为 `T_A_B`：将 B 系坐标转换到 A 系。平移使用米，内部旋转向量使用弧度，不是欧拉角；参考文件明确声明 m/mm、deg/rad，按声明转换。
@@ -133,6 +135,7 @@ outputs/
 │   ├── result.json
 │   ├── handeye_transform.txt
 │   ├── evaluation.json
+│   ├── report.html
 │   ├── residuals.csv
 │   └── figures/
 ├── eye_on_hand/<calibration_id>/
@@ -140,6 +143,7 @@ outputs/
 │   ├── run.json
 │   ├── analysis.json
 │   ├── evaluation.json
+│   ├── report.html
 │   ├── residuals.csv
 │   └── figures/
 └── motion_validation/<motion_id>/
@@ -148,11 +152,15 @@ outputs/
     └── events.json
 ```
 
+手眼标定与 `analyze calibration` 均生成五张图：`pose_errors.png`（相对均值的一致性残差）、`components.png`（一致性分量）、`reprojection.png`（观测与 chain 重投影）、`reference_pose_errors.png`（相对配置参考位姿的偏差）、`reference_components.png`（参考板坐标系下的偏差分量）。不再生成 `spatial.png`。chain 仍使用样本平均安装位姿。参考字段为眼在手外的 `board_to_tcp_rough` 或眼在手上的 `board_to_base_rough`；单位和旋转表示以参考配置声明为准，参考值缺失时对应图明确标注无数据。
+
+`handeye_transform.txt` 的矩阵固定保存 8 位小数，`result.json` 中同一矩阵同步舍入到 8 位小数；求解内部保留原精度，评价使用导出矩阵以保证标定与后续分析一致。
+
 三个数据类别使用相同帧目录结构，观测数据没有机器人文件。原图可以是彩色或灰度，检测绘制内容不覆盖原图。RealSense 深度可关闭；开启时对齐到彩色图并换算为米，**当前手眼算法不使用深度修正**。
 
 每次采集、求解和独立分析新建目录，以本机时间命名，同秒重名增加序号；不覆盖旧文件。帧完成标记最后写入，不完整帧不参与读取。`--data-root` 指定数据分类目录的父目录；`--output-root` 指定本次新结果目录的父目录。
 
-`calibrate` 的附带评价保存在本次标定目录，显式 `analyze` 保存在新的分析目录。两者共用同一手眼评价函数，相同矩阵、数据和评价设置应得到相同指标。报告使用 mm、deg、px；逐帧数据见 CSV。图表保存位置/旋转残差、分量及重投影曲线。
+`calibrate` 的附带评价保存在本次标定目录，显式 `analyze` 保存在新的分析目录。两者共用同一手眼评价函数，相同矩阵、数据和评价设置应得到相同指标。报告使用 mm、deg、px；逐帧数据见 CSV。每次评价另生成 report.html，汇总矩阵、指标和图表；支持放大图表、展开逐帧明细和下载数值。图片及 JSON/CSV 内嵌，可单独复制 HTML 离线查看；生成时核对汇总统计与逐帧数据一致。图表保存位置/旋转残差、分量及重投影曲线。
 
 JSON 保留必要的来源路径、配置和格式版本，不计算文件哈希；短数组单行，矩阵逐行。来源文件关联依靠路径，请保留原始数据；矩阵仍与同目录 `result.json` 中的值核对。
 
@@ -173,7 +181,7 @@ analyze observation：静态采集或读取 → 相机系位姿相对均值的�
 analyze calibration：读取矩阵及配对数据 → 共用评价（不重新求解）
 ```
 
-保留原有求解算法和默认数值：至少 6 帧，优化使用位置/旋转归一化残差，优化失败或变差时保留 SVD。棋盘格使用原图角点；整板使用 alpha=0 去畸变角点并联合 PnP；单 Tag 观测与运动验证沿用 alpha=1 去畸变与 Tag 位姿估计。新数据保存对应投影模型，读取时检查一致性。
+保留原有求解算法和默认数值：至少 6 帧，优化使用位置/旋转归一化残差，优化失败或变差时保留 SVD。棋盘格使用原图角点；整板使用 alpha=0 去畸变图像，由 pyapriltags 直接估计各 Tag 位姿，按 T_camera_board = T_camera_tag × inverse(T_board_tag) 换算后，沿用提交 7d9d24c 的 decision_margin 加权平移均值与 SO(3) 旋转均值；不调用 OpenCV PnP，重投影仅用于质量检查；单 Tag 观测与运动验证沿用 alpha=1 去畸变与 Tag 位姿估计。新数据保存对应投影模型，读取时检查一致性。
 
 | 指标 | 含义 |
 |---|---|

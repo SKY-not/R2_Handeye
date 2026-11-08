@@ -25,6 +25,7 @@ from handeye.calibration.targets import (checkerboard_points, tag_points, tag_co
 from handeye.session import data_paths, read_manifest, write_json
 from handeye.calibration_solver import CalibrationSolver
 from handeye.camera.model import Rectifier, opencv_distortion
+from handeye.targets.geometry import tag_transform
 from handeye.data_collector import CalibDataCollector
 from handeye.error_calculator import ErrorCalculator
 from handeye.robot.ur_robot import URRobot
@@ -152,14 +153,15 @@ K = np.array([[600., 0, 320], [0, 600, 240], [0, 0, 1]])
 
 
 class TargetTests(unittest.TestCase):
-    def test_joint_board_pose_with_rotated_tags_and_partial_visibility(self):
+    def test_fused_board_pose_with_rotated_tags_and_partial_visibility(self):
         config = target_config('apriltag_board')
         config['tag_rotvecs'][2] = [0, 0, np.pi / 2]
         expected = pose_to_mat([.01, .02, .4, .3, -.2, .1])
         for ids in (np.array([1, 2, 3, 4]), np.array([2, 4])):
             points = np.vstack([tag_points(config, int(i)) for i in ids])
             corners, _ = cv2.projectPoints(points, matrix_to_rotvec(expected[:3, :3]), expected[:3, 3], K, np.zeros(5))
-            fitted, error = solve_board_pose(config, ids, corners, K)
+            tag_poses = np.array([expected @ tag_transform(config, int(i)) for i in ids])
+            fitted, error = solve_board_pose(config, ids, corners, K, tag_poses, np.ones(len(ids)))
             np.testing.assert_allclose(fitted, expected, atol=1e-7)
             self.assertLess(error, 1e-7)
 
@@ -186,7 +188,9 @@ class TargetTests(unittest.TestCase):
         pixels, _ = cv2.projectPoints(points, np.array([.3, -.2, .1]), np.array([0., 0., .4]), K, np.zeros(5))
         pixels[4:8, 0, 0] += 40
         with self.assertRaises(ValueError):
-            solve_board_pose(config, ids, pixels, K)
+            expected = pose_to_mat([0., 0., .4, .3, -.2, .1])
+            tag_poses = np.array([expected @ tag_transform(config, int(i)) for i in ids])
+            solve_board_pose(config, ids, pixels, K, tag_poses, np.ones(len(ids)))
 
 
 class CameraModelTests(unittest.TestCase):

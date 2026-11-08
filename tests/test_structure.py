@@ -46,9 +46,61 @@ class StructureTests(unittest.TestCase):
                 self.assertLess(a['chain_reprojection_px']['mean'],1e-4)
                 self.assertEqual(before,content_snapshot(source))
                 self.assertNotEqual(first['output_path'],str(analysis))
-                self.assertTrue((analysis / 'figures/reprojection.png').is_file())
+                expected_figures = {'pose_errors.png','components.png','reprojection.png',
+                                    'reference_pose_errors.png','reference_components.png'}
+                for output in (Path(first['output_path']), analysis):
+                    self.assertEqual({p.name for p in (output/'figures').glob('*.png')}, expected_figures)
+                    html = (output/'report.html').read_text()
+                    self.assertEqual(html.count('class="plot-button"'),5)
+                    self.assertIn('T_base_camera' if mode=='eye_to_hand' else 'T_tcp_camera', html)
+                    self.assertIn('id="frame-details"', html)
+                saved = Path(first['output_path'])
+                for number in (saved/'handeye_transform.txt').read_text().split():
+                    self.assertRegex(number, r'^-?[0-9]+[.][0-9]{8}$')
+                matrix, _ = load_handeye(saved)
+                np.testing.assert_array_equal(matrix, read_json(saved/'result.json')['transform'])
+                np.testing.assert_allclose(matrix, first['X'], atol=5.1e-9, rtol=0)
+                from decimal import Decimal
+                serialized = json.loads((saved/'result.json').read_text(), parse_float=Decimal)['transform']
+                self.assertTrue(all(value.as_tuple().exponent >= -8 for row in serialized for value in row))
+                if mode == 'eye_on_hand':
+                    self.assertIsNone(a['reference'])  # No configured base-to-board reference.
+                else:
+                    self.assertIsNotNone(a['reference'])
                 self.assertEqual(read_json(Path(first['output_path']) / 'result.json')['status'],'complete')
                 self.assertNotIn('sha256',json.dumps(read_json(Path(first['output_path']) / 'result.json')))
+
+    def test_reference_plots_use_configured_pose_and_matching_components(self):
+        from handeye.calibration.transforms import pose_to_mat, invert_transform, matrix_to_rotvec
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root/'input'
+            write_session(source, schema=2)
+            actual_mount = pose_to_mat([.01,.02,.03,.1,0,0])
+            expected_error = pose_to_mat([.01,0,0,0,0,.1])
+            reference = actual_mount @ invert_transform(expected_error)
+            reference_pose = np.r_[reference[:3,3], np.degrees(matrix_to_rotvec(reference[:3,:3]))]
+            path = root/'reference.json'
+            write_json(path, {'target_id':'apriltag_board','translation_unit':'m',
+                'rotation_unit':'deg','rotation_representation':'rotation_vector',
+                'tcp_definition':[0]*6, 'board_to_tcp_rough':reference_pose})
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = calibrate_session(source, output_root=root, reference_config=path)
+                analysis = analyze_calibration(result['output_path'], output_root=root, reference_config=path)
+            report = read_json(analysis/'evaluation.json')
+            self.assertAlmostEqual(report['reference']['position_mm']['mean'], 10., places=4)
+            self.assertAlmostEqual(report['reference']['rotation_deg']['mean'], np.degrees(.1), places=4)
+            self.assertLess(report['spatial_position_mm']['mean'], 1e-4)
+            self.assertLess(report['chain_reprojection_px']['mean'], 1e-4)
+            with (analysis/'residuals.csv').open() as stream:
+                rows = list(csv.DictReader(stream))
+            for row in rows:
+                position = [float(row['reference_d'+axis+'_mm']) for axis in 'xyz']
+                rotation = [float(row['reference_r'+axis+'_deg']) for axis in 'xyz']
+                np.testing.assert_allclose(position, [10.,0,0], atol=2e-5, rtol=0)
+                np.testing.assert_allclose(rotation, [0,0,np.degrees(.1)], atol=2e-5, rtol=0)
+                self.assertAlmostEqual(np.linalg.norm(position), float(row['reference_position_mm']), places=10)
+                self.assertAlmostEqual(np.linalg.norm(rotation), float(row['reference_rotation_deg']), places=10)
 
     def test_v1_legacy_session_still_loads_without_live_target_config(self):
         with tempfile.TemporaryDirectory() as directory:

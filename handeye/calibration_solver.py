@@ -324,12 +324,14 @@ class CalibrationSolver:
         """保存结果到文件"""
         results_path = str(new_run_directory((self.output_root if self.output_root is not None else Path(get_results_path(self.mode)))))
         self.output_path = results_path
+        exported_X = np.round(np.asarray(X, dtype=np.float64), decimals=8)
+        exported_X[exported_X == 0] = 0.0
         write_json(Path(results_path) / 'result.json', {
             'mode': self.mode, 'backend': self.backend, 'source_session': self.source_session,
             'data_id': None if self.source_session is None else Path(self.source_session).name,
             'schema_version': 2, 'legacy_pose_only': self.legacy_pose_only,
             'target': self.target_config, 'diagnostics': self.solver.diagnostics,
-            'transform': X, 'optimization_accepted': bool(optimization is not None and optimization.success),
+            'transform': exported_X, 'optimization_accepted': bool(optimization is not None and optimization.success),
             'position_scale_m': self.config['position_scale_m'],
             'rotation_scale_rad': self.config['rotation_scale_rad'],
             'status': 'solved',
@@ -338,6 +340,6 @@ class CalibrationSolver:
         })
 
         # 保存手眼变换矩阵
-        np.savetxt(os.path.join(results_path, 'handeye_transform.txt'), X, delimiter=' ')
+        np.savetxt(os.path.join(results_path, 'handeye_transform.txt'), exported_X, fmt='%.8f', delimiter=' ')
 
         print(f"\n结果已保存至: {results_path}")

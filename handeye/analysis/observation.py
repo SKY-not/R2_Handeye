@@ -34,6 +34,8 @@ def capture_observations(config='configs/observation.json', *, data_root=None):
             'target':target,'configuration_source':str(resolve_path(config)), 'capture_config':settings,
             'camera_matrix':camera.intrinsics,'dist_coeffs':np.asarray(camera.dist_coeffs).ravel(),
             'image_size':[camera.im_width,camera.im_height],'camera_id':camera.device_id,
+            'distortion_model':getattr(camera,'distortion_model','opencv'),
+            'source_camera_model':getattr(camera,'source_camera_model',None),
             'translation_unit':'m','rotation_unit':'rad','rotation_representation':'rotation_vector',
             'depth_unit':'m','depth_alignment':'image','status':'collecting'}
         write_json(root / 'session.json',metadata)
@@ -134,7 +136,8 @@ def analyze_observation(data, *, output_root=None, visualize=False,
         'kind':'observation','visualization':load_config(visualization_config)},output_root=output_root)
     try:
         write_json(root / 'analysis.json',{'kind':'observation','data':str(path),'data_id':path.name})
-        save_report(root,report,rows,visualization_config=visualization_config,show=visualize)
+        save_report(root,report,rows,visualization_config=visualization_config,show=visualize,
+                    context={'source_session':str(path)})
         print('Static visual repeatability does not establish hand-eye accuracy.')
     except Exception as error:
         finish_run(root,'failed',error=str(error)); raise

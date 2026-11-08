@@ -8,7 +8,7 @@ Intel RealSense D405 相机驱动
 import numpy as np
 import cv2
 from typing import Any, Optional, Tuple
-from handeye.camera.model import opencv_distortion
+from handeye.camera.model import InverseBrownRectifier, opencv_distortion
 
 
 class RealSenseCamera:
@@ -42,6 +42,8 @@ class RealSenseCamera:
         self.intrinsics: Optional[np.ndarray] = None
         self.dist_coeffs: Optional[np.ndarray] = None
         self.distortion_model = 'none'
+        self.source_camera_model: Optional[dict] = None
+        self._color_rectifier: Optional[InverseBrownRectifier] = None
         self.depth_scale: Optional[float] = None
         self.align: Optional[Any] = None
 
@@ -129,6 +131,8 @@ class RealSenseCamera:
             if not frame:
                 raise RuntimeError('No depth frame received')
             depth = np.asarray(frame.get_data(), dtype=np.float32) * self.depth_scale
+        if self._color_rectifier is not None:
+            image, depth = self._color_rectifier.apply(image, depth)
         return image, depth
 
     def get_color_image(self) -> np.ndarray:
@@ -139,25 +143,17 @@ class RealSenseCamera:
         assert pipeline is not None
         frames = pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
-        return np.asarray(color_frame.get_data(), dtype=np.uint8)
+        image = np.asanyarray(color_frame.get_data()).copy()
+        if self._color_rectifier is not None:
+            image, _ = self._color_rectifier.apply(image)
+        return image
 
     def get_depth_image(self) -> np.ndarray:
         """获取深度图像 (单位: 米)"""
         if not self.enable_depth:
             raise ValueError('Depth stream is disabled in camera configuration')
-        if not self.connected:
-            self.connect()
-        pipeline = self.pipeline
-        align = self.align
-        depth_scale = self.depth_scale
-        assert pipeline is not None and align is not None and depth_scale is not None
-
-        frames = pipeline.wait_for_frames()
-        aligned_frames = align.process(frames)
-        depth_frame = aligned_frames.get_depth_frame()
-
-        depth_image = np.asarray(depth_frame.get_data(), dtype=np.float32)
-        depth_image = depth_image * depth_scale
+        _, depth_image = self.get_data()
+        assert depth_image is not None
         return depth_image
 
     def get_aligned_depth(self, u: int, v: int) -> float:
@@ -222,8 +218,23 @@ class RealSenseCamera:
     def _get_dist_coeffs(self, rgb_profile: Any) -> np.ndarray:
         """获取相机畸变系数 (k1, k2, p1, p2, k3)."""
         raw_intrinsics = rgb_profile.as_video_stream_profile().get_intrinsics()
-        self.distortion_model = str(raw_intrinsics.model).split('.')[-1]
-        return opencv_distortion(self.distortion_model, raw_intrinsics.coeffs)
+        source_model = str(raw_intrinsics.model).split('.')[-1]
+        coefficients = np.asarray(raw_intrinsics.coeffs, dtype=np.float64)
+        self.source_camera_model = {
+            'camera_matrix': self.intrinsics.copy(),
+            'distortion_model': source_model,
+            'dist_coeffs': coefficients.copy(),
+            'image_size': [raw_intrinsics.width, raw_intrinsics.height],
+        }
+        self._color_rectifier = None
+        if source_model == 'inverse_brown_conrady' and np.any(coefficients != 0):
+            self._color_rectifier = InverseBrownRectifier(self.intrinsics, coefficients)
+            self._color_rectifier.prepare((raw_intrinsics.width, raw_intrinsics.height))
+            # All image getters apply the map before exposing zero distortion.
+            self.distortion_model = 'none'
+            return np.zeros(5)
+        self.distortion_model = source_model
+        return opencv_distortion(source_model, coefficients)
 
     def display(self, wait_key: int = 1) -> None:
         """

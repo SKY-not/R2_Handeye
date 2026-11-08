@@ -8,6 +8,8 @@ from handeye.targets.geometry import checkerboard_points, reprojection_errors
 from handeye.session import read_manifest, load_handeye, begin_run, finish_run, write_json
 from handeye.analysis.report import statistics, save_report
 
+DEFAULT_REFERENCE_CONFIG = 'configs/references/lab_board_mount.json'
+
 
 def reference_pose(path, collector):
     if path is None:
@@ -48,13 +50,21 @@ def evaluate(collector, solver, result, robot, camera, corners, images, tag_corn
               'spatial_position_mm':statistics(positions*1000),
               'spatial_rotation_deg':statistics(np.degrees(rotations)),
               'reference':None, 'observed_reprojection_px':None, 'chain_reprojection_px':None}
+    reference_config = DEFAULT_REFERENCE_CONFIG if reference_config is None else reference_config
     ref, reference = reference_pose(reference_config, collector)
-    rp = rr = None
+    rp = rr = rpc = rrc = None
     if ref is not None and not collector.legacy_pose_only:
         kwargs = {'board_to_base' if collector.mode == 'eye_on_hand' else 'board_to_tcp':ref}
-        rp = calculator.calculate_position_error(robot,camera,X,**kwargs)*1000
-        rr = np.degrees(calculator.calculate_rotation_error(robot,camera,X,**kwargs))
-        report['reference'] = {'definition':reference, 'position_mm':statistics(rp), 'rotation_deg':statistics(rr)}
+        rpc, rrc = calculator.calculate_pose_error_components(robot,camera,X,**kwargs)
+        rp = np.linalg.norm(rpc, axis=1)*1000
+        rr = np.degrees(np.linalg.norm(rrc, axis=1))
+        report['reference'] = {
+            'definition':reference, 'source':str(resolve_path(reference_config)),
+            'residual_frame':'reference_target',
+            'position_mm':statistics(rp), 'rotation_deg':statistics(rr),
+            'position_components_mm':{axis:statistics(rpc[:,j]*1000) for j,axis in enumerate('xyz')},
+            'rotation_components_deg':{axis:statistics(np.degrees(rrc[:,j])) for j,axis in enumerate('xyz')},
+        }
     observed = chain = None
     if not collector.legacy_pose_only:
         if collector.backend == 'checkerboard':
@@ -77,21 +87,24 @@ def evaluate(collector, solver, result, robot, camera, corners, images, tag_corn
                      'observed_reprojection_px':None if observed is None else finite(observed[i]),
                      'chain_reprojection_px':None if chain is None else finite(chain[i]),
                      'reference_position_mm':None if rp is None else float(rp[i]),
-                     'reference_rotation_deg':None if rr is None else float(rr[i])})
+                     'reference_rotation_deg':None if rr is None else float(rr[i]),
+                     **dict(zip(('reference_dx_mm','reference_dy_mm','reference_dz_mm'),
+                                [None]*3 if rpc is None else rpc[i]*1000)),
+                     **dict(zip(('reference_rx_deg','reference_ry_deg','reference_rz_deg'),
+                                [None]*3 if rrc is None else np.degrees(rrc[i])))})
     print(f'Evaluation scope: {scope}; reference deviations are not independent absolute accuracy.')
     if result.get('output_path'):
-        save_report(result['output_path'], report, rows, visualization_config=visualization_config, show=visualize)
-        from handeye.result_visualizer import ResultVisualizer
-        view = ResultVisualizer(collector.mode, settings=load_config(visualization_config))
-        kwargs = {'board_to_base' if collector.mode == 'eye_on_hand' else 'board_to_tcp':ref}
-        view.visualize(robot,X,camera_poses=camera,**kwargs,
-                       output=Path(result['output_path']) / 'figures/spatial.png',show=visualize)
+        context = {'mode':collector.mode, 'backend':collector.backend,
+                   'source_session':solver.source_session, 'transform':np.asarray(X).tolist()}
+        save_report(result['output_path'], report, rows, visualization_config=visualization_config,
+                    show=visualize, context=context)
     return report
 
 
 def analyze_calibration(result, *, data=None, mode=None, reference_config=None,
                         output_root=None, visualize=False, visualization_config='configs/visualization.json'):
     from handeye.pipeline import load_calibration_data
+    reference_config = DEFAULT_REFERENCE_CONFIG if reference_config is None else reference_config
     matrix, source = load_handeye(result, mode=mode)
     path = data or source['source_session']
     if path is None:

@@ -159,6 +159,7 @@ class CalibDataCollector(TargetDetector):
             'camera_matrix': self.intrinsics, 'dist_coeffs': self.dist_coeffs.ravel(),
             'camera_id': getattr(self.camera, 'device_id', None),
             'distortion_model': getattr(self.camera, 'distortion_model', 'opencv'),
+            'source_camera_model': getattr(self.camera, 'source_camera_model', None),
             'image_size': [self.camera.im_width, self.camera.im_height],
             'corner_space': 'raw' if self.backend == 'checkerboard' else 'rectified_alpha0',
             'translation_unit': 'm', 'rotation_representation': 'rotation_vector', 'rotation_unit': 'rad',

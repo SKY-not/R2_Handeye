@@ -1,4 +1,4 @@
-"""Shared detection; board PnP and single-tag pose algorithms retain their conventions."""
+"""Shared pyapriltags detection and direct pose estimation."""
 from __future__ import annotations
 from typing import Any, List, Tuple
 import cv2
@@ -84,7 +84,7 @@ class TargetDetector:
         rgb: np.ndarray,
         gray: np.ndarray
     ) -> Tuple[np.ndarray, List[Any], int, int]:
-        """Detect board corners on the undistorted image; joint PnP estimates pose."""
+        """Estimate each visible tag pose with pyapriltags on the rectified image."""
         if self.apriltag_detector is None:
             return rgb, [], gray.shape[1], gray.shape[0]
 
@@ -94,7 +94,10 @@ class TargetDetector:
 
         detections = self.apriltag_detector.detect(
             undistorted_gray,
-            estimate_tag_pose=False,
+            estimate_tag_pose=True,
+            camera_params=(self.rectifier.new_K[0, 0], self.rectifier.new_K[1, 1],
+                           self.rectifier.new_K[0, 2], self.rectifier.new_K[1, 2]),
+            tag_size=self.target_config['tag_size'],
         )
         return undistorted_rgb, list(detections), w, h
 
@@ -104,7 +107,7 @@ class TargetDetector:
         depth: np.ndarray,
         gray: np.ndarray
     ) -> 'CaptureFrameData':
-        """Estimate one board pose jointly from all visible tag corners."""
+        """Fuse direct tag poses into the configured board frame."""
         if self.apriltag_detector is None:
             return {'success': False, 'rgb': rgb, 'depth': depth}
 
@@ -112,6 +115,7 @@ class TargetDetector:
         margins: List[float] = []
         visible_ids: List[int] = []
         visible_corners: List[np.ndarray] = []
+        visible_poses: List[np.ndarray] = []
 
         for det in detections:
             tag_id = int(det.tag_id)
@@ -129,7 +133,10 @@ class TargetDetector:
             if area_ratio < self.apriltag_min_area_ratio:
                 continue
 
+            if getattr(det, 'pose_R', None) is None or getattr(det, 'pose_t', None) is None:
+                continue
             margins.append(margin)
+            visible_poses.append(self._make_transform(det.pose_R, det.pose_t))
             visible_ids.append(tag_id)
             visible_corners.append(np.asarray(det.corners, dtype=np.float32).reshape(4, 2))
 
@@ -144,7 +151,8 @@ class TargetDetector:
 
         try:
             fused_pose, _ = solve_board_pose(self.target_config, np.asarray(visible_ids),
-                                             np.vstack(visible_corners), self.rectifier.new_K)
+                                             np.vstack(visible_corners), self.rectifier.new_K,
+                                             np.asarray(visible_poses), np.asarray(margins))
         except (ValueError, cv2.error) as exc:
             print(f'AprilTag board rejected: {exc}')
             return {'success': False}

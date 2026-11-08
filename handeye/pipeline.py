@@ -4,8 +4,8 @@ import json
 from handeye.config import load_config, load_workflow, effective_target, resolve_path
 from handeye.data_collector import CalibDataCollector
 from handeye.calibration_solver import CalibrationSolver
-from handeye.session import read_manifest, write_json
-from handeye.analysis.calibration import evaluate
+from handeye.session import load_handeye, read_manifest, write_json
+from handeye.analysis.calibration import DEFAULT_REFERENCE_CONFIG, evaluate
 
 
 def load_calibration_data(session, *, mode=None, backend=None, solver_config=None,
@@ -35,6 +35,7 @@ def load_calibration_data(session, *, mode=None, backend=None, solver_config=Non
 def calibrate_session(session, *, mode=None, backend=None, solver_config=None, output_root=None,
                       legacy_poses=False, visualize=False, reference_config=None,
                       visualization_config='configs/visualization.json'):
+    reference_config = DEFAULT_REFERENCE_CONFIG if reference_config is None else reference_config
     collector, solver, data = load_calibration_data(session, mode=mode, backend=backend,
         solver_config=solver_config, output_root=output_root, legacy_poses=legacy_poses)
     definition = (collector.session_metadata or {}).get('tcp_definition')
@@ -44,7 +45,9 @@ def calibrate_session(session, *, mode=None, backend=None, solver_config=None, o
     path = Path(result['output_path']) / 'result.json'
     metadata = json.loads(path.read_text(encoding='utf-8'))
     try:
-        result['evaluation'] = evaluate(collector, solver, result, *data, visualize=visualize,
+        # Evaluate the exported matrix so calibrate and later analyze use identical values.
+        exported_matrix, _ = load_handeye(result['output_path'])
+        result['evaluation'] = evaluate(collector, solver, {**result, 'X':exported_matrix}, *data, visualize=visualize,
             reference_config=reference_config, visualization_config=visualization_config)
         metadata.update(status='complete', evaluation_file='evaluation.json')
         metadata['configuration']['visualization'] = load_config(visualization_config)
