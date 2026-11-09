@@ -45,6 +45,8 @@ class CaptureFrameData(TypedDict, total=False):
     corners: Optional[np.ndarray]
     corners_refined: Optional[np.ndarray]
     tag_pose: np.ndarray
+    charuco_ids: List[int]
+    board_pose: np.ndarray
     tag_id: int
     tag_ids: List[int]
     tag_decision_margin: float
@@ -161,7 +163,7 @@ class CalibDataCollector(TargetDetector):
             'distortion_model': getattr(self.camera, 'distortion_model', 'opencv'),
             'source_camera_model': getattr(self.camera, 'source_camera_model', None),
             'image_size': [self.camera.im_width, self.camera.im_height],
-            'corner_space': 'raw' if self.backend == 'checkerboard' else 'rectified_alpha0',
+            'corner_space': 'raw' if self.backend in ('checkerboard', 'charuco') else 'rectified_alpha0',
             'translation_unit': 'm', 'rotation_representation': 'rotation_vector', 'rotation_unit': 'rad',
             'depth_unit': 'm', 'depth_alignment': 'image',
         }
@@ -171,7 +173,7 @@ class CalibDataCollector(TargetDetector):
     def use_session(self, root: str, legacy_pose_only: bool = False) -> None:
         path = Path(root)
         if not (path / 'session.json').exists():
-            if not legacy_pose_only or self.backend == 'checkerboard':
+            if not legacy_pose_only or self.backend in ('checkerboard', 'charuco'):
                 raise ValueError('旧数据缺少 session.json；AprilTag 可显式选择仅分析历史位姿，棋盘格请重新采集')
             self.legacy_pose_only = True
             self.session_metadata = None
@@ -183,7 +185,7 @@ class CalibDataCollector(TargetDetector):
                 validate_zero_tcp_offset(definition.get('offset_m_rotvec_rad'))
             if metadata['mode'] != self.mode or metadata['backend'] != self.backend:
                 raise ValueError('会话的标定模式/后端与当前选择不一致')
-            expected_space = 'raw' if self.backend == 'checkerboard' else 'rectified_alpha0'
+            expected_space = 'raw' if self.backend in ('checkerboard', 'charuco') else 'rectified_alpha0'
             if metadata['corner_space'] != expected_space:
                 raise ValueError('会话角点坐标系与检测后端不一致')
             self.session_metadata = metadata
@@ -317,6 +319,12 @@ class CalibDataCollector(TargetDetector):
         """
         rgb = frame_data.get('display_rgb', frame_data['rgb']).copy()
 
+        if self.backend == 'charuco':
+            cv2.aruco.drawDetectedCornersCharuco(rgb, frame_data['corners_refined'],
+                                               np.asarray(frame_data['charuco_ids'], dtype=np.int32).reshape(-1, 1))
+            cv2.imshow('Corner Detection Result', rgb)
+            cv2.waitKey(100)
+            return
         if self.backend == 'apriltag_board':
             tag_corners = frame_data.get('tag_corners')
             tag_id = frame_data.get('tag_id', -1)
@@ -437,7 +445,7 @@ class CalibDataCollector(TargetDetector):
         if self.backend == 'apriltag_board':
             target_name = "four-AprilTag board"
         else:
-            target_name = "checkerboard corners"
+            target_name = "ChArUco corners" if self.backend == "charuco" else "checkerboard corners"
         print("At each position:")
         print("  1. Move robot to new position (teach by demo)")
         print(f"  2. Press Space to detect {target_name}")

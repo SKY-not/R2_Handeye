@@ -64,8 +64,8 @@ def collect_session(mode, *, config='configs/capture.json', data_root=None):
     from handeye.device_manager import DeviceManager
     settings = load_workflow(config, robot=True)
     target = effective_target(settings)
-    if target['type'] not in ('checkerboard','apriltag_board'):
-        raise ValueError('Hand-eye collection requires checkerboard or apriltag_board, not a single-tag observation target')
+    if target['type'] not in ('checkerboard','charuco','apriltag_board'):
+        raise ValueError('Hand-eye collection requires checkerboard, charuco or apriltag_board, not a single-tag observation target')
     manager = DeviceManager(settings)
     try:
         manager.connect()

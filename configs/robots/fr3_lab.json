@@ -1,0 +1,6 @@
+{
+  "driver": "fairino",
+  "tcp_host_ip": "192.168.58.2",
+  "sdk_path": "third_party/fairino-python-sdk-2.1.6_robot3.8.6/windows",
+  "state_timeout_s": 2.0
+}

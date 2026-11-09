@@ -14,6 +14,10 @@ def create_camera(settings):
 
 
 def create_robot(settings):
+    if settings['driver'] == 'fairino':
+        from handeye.robot.fairino_robot import FairinoRobot
+        return FairinoRobot(settings['tcp_host_ip'], settings['sdk_path'],
+                            state_timeout_s=settings.get('state_timeout_s', 2.0))
     if settings['driver'] != 'ur':
         raise ValueError(f'Unsupported robot driver: {settings["driver"]}')
     from handeye.robot.ur_robot import URRobot

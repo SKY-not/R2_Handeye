@@ -67,7 +67,21 @@ def evaluate(collector, solver, result, robot, camera, corners, images, tag_corn
         }
     observed = chain = None
     if not collector.legacy_pose_only:
-        if collector.backend == 'checkerboard':
+        if collector.backend == 'charuco':
+            from handeye.calibration.transforms import target_poses, average_transforms, invert_transform
+            reference = average_transforms(target_poses(collector.mode, robot, camera, X))
+            left = [invert_transform(t) for t in robot] if collector.mode == 'eye_on_hand' else robot
+            predictions = invert_transform(X) @ np.asarray(left) @ reference
+            def errors(poses):
+                values = []
+                for pose, points, pixels in zip(poses, solver.object_points_list, corners):
+                    try:
+                        values.append(float(reprojection_errors(pose, points, pixels, solver.intrinsics, solver.dist_coeffs).mean()))
+                    except ValueError:
+                        values.append(float('nan'))
+                return np.asarray(values)
+            observed, chain = errors(camera), errors(predictions)
+        elif collector.backend == 'checkerboard':
             points = checkerboard_points(collector.target_config)
             observed = np.asarray([reprojection_errors(pose,points,pixels,solver.intrinsics,solver.dist_coeffs).mean()
                                    for pose,pixels in zip(camera,corners)])

@@ -254,7 +254,7 @@ class StructureTests(unittest.TestCase):
         capture=load_workflow('configs/capture.json',robot=True)
         observation=load_workflow('configs/observation.json')
         self.assertIn('robot',capture);self.assertNotIn('robot',observation)
-        self.assertEqual(capture['target']['type'],'apriltag_board')
+        self.assertEqual(capture['target']['type'],'charuco')
         self.assertEqual(observation['target']['type'],'apriltag')
         self.assertNotIn('detection',load_config('configs/solver.json'))
 

@@ -139,6 +139,7 @@ class CalibrationSolver:
         print(f"加载了 {len(saved_data)} 个数据点")
 
         self.sample_indices = []
+        self.object_points_list = []
         robot_poses = []
         camera_poses = []
         corners_2d_list = []
@@ -151,7 +152,14 @@ class CalibrationSolver:
         for d_any in saved_data:
             d = cast(Dict[str, Any], d_any)
             tcp = validate_transform(d['tcp'], f"TCP frame {d['index']}")
-            if self.backend == 'apriltag_board':
+            if self.backend == 'charuco':
+                from handeye.targets.charuco import correspondences
+                points, corners_2d = correspondences(self.target_config, d['charuco_ids'], d['corners'])
+                camera_pose = validate_transform(np.asarray(d['tag_pose']))
+                self.object_points_list.append(points)
+                tag_corners_arr = np.zeros((0, 2), dtype=np.float32)
+                tag_ids_arr = np.zeros((0,), dtype=np.int32)
+            elif self.backend == 'apriltag_board':
                 tag_pose = d.get('tag_pose')
                 if tag_pose is None:
                     print(f"  警告: 帧 {d['index']} 缺少 tag_pose，跳过")

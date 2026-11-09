@@ -29,7 +29,7 @@ def capture_observations(config='configs/observation.json', *, data_root=None):
         detector = TargetDetector(target,camera)
         root = new_run_directory((PROJECT_ROOT / 'data' if data_root is None else resolve_path(data_root)) / 'observation')
         (root / 'frames').mkdir()
-        space = {'checkerboard':'raw','apriltag_board':'rectified_alpha0','apriltag':'rectified_alpha1'}[target['type']]
+        space = {'charuco':'raw','checkerboard':'raw','apriltag_board':'rectified_alpha0','apriltag':'rectified_alpha1'}[target['type']]
         metadata = {'schema_version':2,'kind':'observation','corner_space':space,
             'target':target,'configuration_source':str(resolve_path(config)), 'capture_config':settings,
             'camera_matrix':camera.intrinsics,'dist_coeffs':np.asarray(camera.dist_coeffs).ravel(),

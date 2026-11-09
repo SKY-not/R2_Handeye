@@ -30,9 +30,18 @@ def load_workflow(path, *, robot=False):
         raise ValueError(f'Unknown detection profile: {profile}')
     settings['detection'] = deepcopy(profiles[profile])
     target = settings['target']
-    if target.get('type') not in ('checkerboard', 'apriltag_board', 'apriltag'):
+    if target.get('type') not in ('checkerboard', 'charuco', 'apriltag_board', 'apriltag'):
         raise ValueError(f'Unsupported target type: {target.get("type")}')
-    if target['type'] != 'checkerboard':
+    if target['type'] == 'charuco':
+        from handeye.targets.charuco import make_board
+        board = make_board(target)
+        minimum = settings['detection'].get('min_visible_corners', 6)
+        limit = settings['detection'].get('max_reprojection_error_px', 2.)
+        if type(minimum) is not int or not 6 <= minimum <= len(board.getChessboardCorners()):
+            raise ValueError('Invalid ChArUco minimum corner count')
+        if not isinstance(limit, (int, float)) or not math.isfinite(limit) or limit <= 0:
+            raise ValueError('Invalid ChArUco reprojection limit')
+    if target['type'] in ('apriltag_board', 'apriltag'):
         if not 1 <= int(settings['detection']['min_visible_tags']) <= len(target['tag_ids']):
             raise ValueError('Detection min_visible_tags is incompatible with target geometry')
     if target['type'] == 'apriltag':
@@ -49,7 +58,7 @@ def load_workflow(path, *, robot=False):
 
 def target_definition(backend, solver_config=None):
     """Defaults for direct library callers; saved sessions supply their own geometry."""
-    if backend not in ('checkerboard', 'apriltag_board'):
+    if backend not in ('checkerboard', 'charuco', 'apriltag_board'):
         raise ValueError(f'Unknown target backend: {backend}')
     filename = 'four_apriltag' if backend == 'apriltag_board' else backend
     value = load_config(f'configs/targets/{filename}.json')

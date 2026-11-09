@@ -12,7 +12,7 @@ class TargetDetector:
     def __init__(self, target, camera):
         self.target_config = target
         self.camera = camera
-        self.backend = 'checkerboard' if target['type'] == 'checkerboard' else 'apriltag_board'
+        self.backend = target['type'] if target['type'] in ('checkerboard', 'charuco') else 'apriltag_board'
         self.intrinsics = np.asarray(camera.intrinsics)
         self.dist_coeffs = np.asarray(camera.dist_coeffs)
         self.rectifier = Rectifier(self.intrinsics, self.dist_coeffs)
@@ -20,6 +20,8 @@ class TargetDetector:
 
     def detect_image(self, image, depth=None):
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if self.backend == 'charuco':
+            return self.charuco.detect(image, self.intrinsics, self.dist_coeffs, depth)
         if self.target_config.get('type') == 'apriltag':
             size = (image.shape[1], image.shape[0])
             K, _ = cv2.getOptimalNewCameraMatrix(self.intrinsics, self.dist_coeffs, size, 1.0, size)
@@ -52,6 +54,10 @@ class TargetDetector:
 
     def _configure_target(self) -> None:
         cfg = self.target_config
+        if self.backend == 'charuco':
+            from handeye.targets.charuco import CharucoTarget
+            self.charuco = CharucoTarget(cfg)
+            return
         if self.backend == 'checkerboard':
             self.cb_size = (int(cfg['size'][0]), int(cfg['size'][1]))
             self.extractor = CheckerboardExtractor(self.cb_size, float(cfg['square_size']))

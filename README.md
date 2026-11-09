@@ -1,6 +1,6 @@
 # R2 Hand-Eye Calibration
 
-采集机器人与相机数据，完成手眼标定、静态观测一致性分析和标定结果评价。目前提供 UR 与 RealSense 驱动。
+采集机器人与相机数据，完成手眼标定、静态观测一致性分析和标定结果评价。支持 UR、法奥 FR3 状态采集与 RealSense 相机。
 
 ## Part 1：快速开始
 
@@ -16,9 +16,19 @@ python -m pip install -r requirements.txt
 
 纯离线计算使用 NumPy、SciPy、OpenCV、Matplotlib，不初始化相机或机器人。此次重构未重新安装依赖。
 
+FR3 控制器 V3.8.6 使用 [法奥 Python SDK v2.1.6](https://github.com/FAIR-INNOVATION/fairino-python-sdk/releases/tag/v2.1.6_robot3.8.6)。将 SDK 解压到 `third_party/fairino-python-sdk-2.1.6_robot3.8.6/`，保持内部目录结构。驱动直接加载 `Robot.py`，无需编译或配置 `PYTHONPATH`。`configs/robots/fr3_lab.json` 中的 `sdk_path` 指向包含 `fairino/Robot.py` 的目录，默认使用 `windows`；Linux 改为 SDK 的 `linux` 目录。`tcp_host_ip` 默认填入出厂地址，使用前改为实际控制器 IP。
+
 ### 项目运行
 
 全部使用命令行参数，不设终端选择菜单。先检查所选工作流配置引用的设备和标定板文件。
+
+UR3 和 FR3 共用 `configs/capture.json`。使用 FR3 时，将其中的 `robot_config` 改为：
+
+```json
+"robot_config": "configs/robots/fr3_lab.json"
+```
+
+使用 UR3 时设为 `configs/robots/ur3_lab.json`，采集命令相同：
 
 ```powershell
 python -m scripts.collect --mode eye_to_hand --config configs/capture.json
@@ -67,7 +77,7 @@ python -m scripts.move_tcp --result "$result" --config configs/motion.json --dry
 无硬件回归测试：
 
 ```powershell
-python -B -m unittest discover -s tests -p "test_*.py" -v
+python -X utf8 -B -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ## Part 2：输入与输出
@@ -88,6 +98,7 @@ python -B -m unittest discover -s tests -p "test_*.py" -v
 | 文件 | 参数职责 |
 |---|---|
 | `configs/robots/ur3_lab.json` | 驱动、IP、通信与只读状态端口、工作空间及驱动默认关节速度/加速度 |
+| `configs/robots/fr3_lab.json` | 法奥驱动、实际控制器 IP、SDK 源码目录和新状态等待超时（秒） |
 | `configs/cameras/d405_lab.json` | 驱动、序列号、分辨率、帧率、`enable_depth`；RealSense 内参来自设备 |
 | `configs/targets/*.json` | 板类型、实际尺寸、Tag ID、布局及旋转；不含安装参考位姿 |
 | `configs/detection.json` | `checkerboard`、`apriltag_board`、`apriltag_single` 检测配置组 |
@@ -99,6 +110,8 @@ python -B -m unittest discover -s tests -p "test_*.py" -v
 | `configs/visualization.json` | 图表尺寸与运动预览坐标轴长度 |
 
 机器人配置的 `default_velocity/default_acceleration` 作用于 UR 驱动的关节运动默认值；`move_tcp` 使用 `motion.json` 的 `rtde_velocity/rtde_acceleration`（rad/s、rad/s²）。采集不会主动运动机器人。工作空间参数供 UR 驱动工作空间查询使用，不代表 RTDE 路径规划限制。
+
+FR3 驱动只读取状态，不发送运动或修改工具坐标系。每次采样等待新的反馈包，从同一快照读取法兰位姿和实际工具偏置；偏置六个分量须全零，此时法兰即采集所用 TCP。法奥的毫米转换为米，固定轴 XYZ RPY（度）转换为旋转矩阵；反馈不更新或断线时拒绝采样并报错，SDK 重连循环由适配器关闭，需重新启动采集。FR3 支持两种手眼模式的采集及后续离线计算；`move_tcp` 运动验证仍仅支持 UR。首次实机使用时需对照示教器核对基座系位姿和方向。
 
 换棋盘格或另一块 Tag 板时，修改工作流的 `target_config` 和匹配的 `detection_profile`。静态观测支持棋盘格、整板和单 Tag；手眼采集保留棋盘格与整板，运动验证目前使用单 Tag。
 
@@ -199,7 +212,7 @@ analyze calibration：读取矩阵及配对数据 → 共用评价（不重新�
 configs/               # 工作流配置及 robots/cameras/targets/references
 scripts/               # collect、calibrate、analyze、move_tcp 四个命令入口
 handeye/
-├── robot/             # 状态接口、UR 驱动、独立 RTDE 运动能力
+├── robot/             # 状态接口、UR/法奥采集驱动、独立 UR RTDE 运动能力
 ├── camera/            # 相机接口、RealSense 驱动及畸变模型
 ├── targets/           # 板几何和共用检测器
 ├── calibration/       # 坐标变换、SVD、优化；保留旧几何导入兼容
@@ -216,6 +229,7 @@ handeye/
 data/                  # 原始输入
 outputs/               # 求解、分析和运动验证结果
 tests/                 # 不连接硬件的回归测试
+third_party/           # 本地下载的法奥 SDK（不纳入版本控制）
 ```
 
-`validate` 已合并进 `analyze observation`，旧 `analyze --kind base/consistency` 替换为两个明确的子命令。新增设备时实现接口并登记驱动工厂；本次未实现工业相机、法奥机器人或多相机，也未改变手眼求解模型。
+`validate` 已合并进 `analyze observation`，旧 `analyze --kind base/consistency` 替换为两个明确的子命令。新增设备时实现接口并登记驱动工厂；目前未实现工业相机或多相机。

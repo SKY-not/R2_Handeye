@@ -103,7 +103,13 @@ def save_frame_data(root, sample, target, K, distortion, corner_space):
     from handeye.calibration.transforms import pose_to_mat, validate_transform
     root = Path(root)
     image = sample['rgb']
-    if target['type'] == 'checkerboard':
+    if target['type'] == 'charuco':
+        from handeye.targets.charuco import correspondences
+        points, corners = correspondences(target, sample['charuco_ids'], sample['corners_refined'])
+        pose = validate_transform(sample['board_pose'])
+        projection_K, projection_dist = K, distortion
+        ids = []
+    elif target['type'] == 'checkerboard':
         points = checkerboard_points(target)
         corners = np.asarray(sample['corners_refined']).reshape(-1, 2)
         ok, rvec, tvec = cv2.solvePnP(points, corners, K, distortion)
@@ -129,6 +135,7 @@ def save_frame_data(root, sample, target, K, distortion, corner_space):
         np.save(root / 'depth.npy', depth)
     write_json(root / 'observation.json', {
         'transform':pose, 'image_points':corners, 'object_points':points, 'tag_ids':ids,
+        'charuco_ids':sample.get('charuco_ids', []),
         'corner_space':corner_space, 'projection_matrix':projection_K,
         'projection_distortion':np.asarray(projection_dist).ravel(),
         'reprojection_error_px':error, 'decision_margin':sample.get('tag_decision_margin')})
@@ -174,7 +181,10 @@ def load_frame_data(root, *, require_robot=False):
                 or not np.allclose(observation['projection_distortion'],projection_dist,rtol=0,atol=1e-10)):
             raise ValueError('Saved projection model differs from session')
         target = metadata['target']
-        if target.get('type',metadata.get('backend')) == 'checkerboard':
+        if target.get('type') == 'charuco':
+            from handeye.targets.charuco import correspondences
+            expected_points, _ = correspondences(target, observation['charuco_ids'], observation['image_points'])
+        elif target.get('type',metadata.get('backend')) == 'checkerboard':
             expected_points = checkerboard_points(target)
         else:
             expected_points, _ = tag_correspondences(target,observation['tag_ids'],observation['image_points'])
@@ -191,6 +201,7 @@ def load_frame_data(root, *, require_robot=False):
             'corners': pixels.reshape(-1,1,2) if not len(ids) else None,
             'tag_corners':pixels if len(ids) else None, 'tag_ids':ids,
             'tag_pose':np.asarray(observation['transform']), 'rgb':image, 'depth':None,
+            'charuco_ids':observation.get('charuco_ids', []),
             'index':folder.name, 'observation':observation,
             'frame':json.loads(marker.read_text(encoding='utf-8'))})
     return result
